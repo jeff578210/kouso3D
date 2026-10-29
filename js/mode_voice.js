@@ -1,8 +1,10 @@
 // js/mode_voice.js
-import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,faceLandmarker ,videoElement,getVolumeLevel} from './app.js';
-import { analyser, dataArray, isMicEnabled, recognitionMouth } from './mode_mouth.js';
+import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,getVolumeLevel} from './app.js';
+import { analyser, dataArray, isMicEnabled } from './mode_mouth.js';
+import { onFaceFrame } from './face_tracker.js';
 
 let isDetecting = false; //檢查遊戲有沒有再進行
+let isFrameHandlerRegistered = false; //只向共用臉部偵測註冊一次,避免每局疊加一條迴圈
 let currentTargetSyllable; //當前題目
 let hitCooldown = false; //防止連擊
 let isWaitingForNextSound = false; //防止連擊
@@ -101,9 +103,6 @@ export async function startTfjsDetection() {
         overlapFactor: 0.5, // 偵測視窗重疊率，0.5 代表反應較快
         invokeCallbackOnNoiseAndUnknown: false
     });
-    if(isGameRunning){
-        predictLoop(); //AI 模型判定主迴圈（例如臉部追蹤或是音量頻譜分析）呼叫它代表「判定引擎」正式開始運轉，每一幀都會去檢查玩家有沒有達成動作
-    }
 }
 
 // 3. 停止監聽
@@ -119,28 +118,21 @@ export function stopTfjsDetection() {
 export function startVoiceDetection() {
     if (isDetecting) return;
     isDetecting = true;
-    
-    if (recognitionMouth) { //檢查是否開啟語音判定
-        try { recognitionMouth.stop(); } catch(e){}
-        setTimeout(() => { try { recognitionMouth.start(); } catch(e){} }, 100);
-    }
-    
-    //如果遊戲開始在進行題目渲染
-    if(isGameRunning){
-        predictLoop(); //AI 模型判定主迴圈（例如臉部追蹤或是音量頻譜分析）呼叫它代表「判定引擎」正式開始運轉，每一幀都會去檢查玩家有沒有達成動作
+
+    // 判定由共用的臉部偵測迴圈每張新畫面呼叫一次;停止時只關 isDetecting,不會殘留迴圈
+    if (!isFrameHandlerRegistered) {
+        isFrameHandlerRegistered = true;
+        onFaceFrame(handleFaceFrame);
     }
 }
 
 export function stopVoiceDetection() {
-    isDetecting = false; 
+    isDetecting = false;
     if (recognition) { try { recognition.stop(); } catch(e){} }
 }
 
-function predictLoop() {
-    if (!isDetecting || currentTrainingMode !== 'voice') {
-        requestAnimationFrame(predictLoop);
-        return;
-    }
+function handleFaceFrame(results) {
+    if (!isDetecting || currentTrainingMode !== 'voice') return;
 
     let currentVolume
     if (analyser) {
@@ -157,7 +149,6 @@ function predictLoop() {
         }
     }
 
-    const results = faceLandmarker.detectForVideo(videoElement, performance.now());
     let jawOpen = 0, mouthPucker = 0, mouthStretch = 0, mouthSmile = 0, mouthFunnel = 0;
 
     if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
@@ -176,8 +167,6 @@ function predictLoop() {
             isWaitingForNextSound = false;
         }
     }
-
-    requestAnimationFrame(predictLoop);
 }
 
 

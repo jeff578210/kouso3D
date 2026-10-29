@@ -4,9 +4,10 @@
 // ✦ TF.js 4 透過 ESM CDN 動態載入,不影響 index.html 上既有的 tfjs@1.3.1(供 speech-commands 用)
 // ✦ 原版備份在 mode_tongue.js.bak
 
-import { faceLandmarker, currentVrm, currentTrainingMode, isGameRunning, currentDifficulty,
+import { currentVrm, currentTrainingMode, isGameRunning, currentDifficulty,
          DIFFICULTY_CONFIG, poseQueue, isTutorialLocked, triggerResult } from './app.js';
 import { TongueDirectionDetector } from './tongue_direction.js';
+import { onFaceFrame } from './face_tracker.js';
 // 使用 index.html 上載入的全域 tf(已升級為 TF 4.x);speech-commands 也共用這個版本
 const tf = window.tf;
 
@@ -16,6 +17,8 @@ let detector = null;
 let video;
 let isDetecting = false;
 let lastTime = performance.now();
+// 兩張畫面的最大間隔(ms):切換分頁回來時避免計時器一次跳好幾秒
+const MAX_DT = 250;
 
 // 沿用原本平滑邏輯(讓下游判定零修改)
 const SMOOTHING_FACTOR = 0.1;
@@ -63,7 +66,7 @@ export function startTongueDetection() {
   if (isDetecting) return;
   isDetecting = true;
   lastTime = performance.now();
-  predictLoop();
+  onFaceFrame(handleFaceFrame); // 由共用的臉部偵測迴圈每張新畫面呼叫一次
 }
 
 export function stopTongueDetection() {
@@ -81,20 +84,13 @@ function checkTonguePoseMatch(targetPose, detectedAction, confidence, threshold)
   return poseMap[targetPose] === detectedAction;
 }
 
-async function predictLoop() {
-  if (!isDetecting || currentTrainingMode !== 'tongue') {
-    requestAnimationFrame(predictLoop);
-    return;
-  }
+// results 來自共用的 MediaPipe FaceLandmarker,不再自己重跑一次偵測
+function handleFaceFrame(results, now) {
+  const dt = Math.min(now - lastTime, MAX_DT);
+  lastTime = now;
+  if (!isDetecting || currentTrainingMode !== 'tongue') return;
 
-  let currentTime = performance.now();
-  let dt = currentTime - lastTime;
-  lastTime = currentTime;
-
-  if (detector && video && video.readyState >= 2 && faceLandmarker) {
-    // MediaPipe FaceLandmarker(Tasks Vision)取得 landmarks
-    const results = faceLandmarker.detectForVideo(video, currentTime);
-
+  if (detector && video) {
     if (results.faceLandmarks && results.faceLandmarks.length > 0) {
       const landmarks = results.faceLandmarks[0];
 
@@ -203,5 +199,4 @@ async function predictLoop() {
       }
     }
   }
-  requestAnimationFrame(predictLoop);
 }
