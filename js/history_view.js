@@ -10,6 +10,23 @@ let chartMode = null;
 
 const $ = (id) => document.getElementById(id);
 
+// Chart.js 只有打開訓練紀錄才用得到,第一次打開時才下載(不拖慢遊戲載入)
+const CHART_JS_URL = 'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js';
+let chartJsPromise = null;
+function loadChartJs() {
+  if (window.Chart) return Promise.resolve();
+  if (!chartJsPromise) {
+    chartJsPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = CHART_JS_URL;
+      s.onload = resolve;
+      s.onerror = () => { chartJsPromise = null; reject(new Error('圖表元件載入失敗,請檢查網路')); };
+      document.head.appendChild(s);
+    });
+  }
+  return chartJsPromise;
+}
+
 async function fetchHistory(playerName) {
   const base = (window.GAME_API_BASE || '').replace(/\/$/, '');
   if (!base) throw new Error('window.GAME_API_BASE 未設定');
@@ -157,7 +174,7 @@ export async function openHistory(playerName) {
   content.style.display = 'none';
 
   try {
-    const rows = await fetchHistory(playerName);
+    const [rows] = await Promise.all([fetchHistory(playerName), loadChartJs()]);
     loading.style.display = 'none';
     if (!rows.length) {
       emptyEl.style.display = 'block';

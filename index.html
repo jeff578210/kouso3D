@@ -5,12 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>3D 健口操</title>
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
-    <!-- TF.js 升級到 4.x:給新的 U-Net 舌頭模型使用;speech-commands 也用同一個全域 tf -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.5.4/dist/speech-commands.min.js"></script>
-    <!-- Chart.js:歷史紀錄圖表 -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <!-- TF.js 4.x:給 U-Net 舌頭模型使用。defer:不擋住畫面顯示,仍會在 js/app.js 之前執行 -->
+    <script defer src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
+    <!-- Chart.js 改由 js/history_view.js 在第一次打開訓練紀錄時才載入 -->
+    <!-- 已移除未使用的 canvas-confetti 與 speech-commands(發聲模式改用音量判定) -->
     <!-- Teachable Machine 已不再使用(被 U-Net 取代),保留舊腳本參考可改回 tfjs@1.3.1 + 這行 -->
     <!-- <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script> -->
 
