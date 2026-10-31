@@ -4,13 +4,14 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
-import { FaceLandmarker, FilesetResolver } from "https://cdn.skypack.dev/@mediapipe/tasks-vision@0.10.3";
+// MediaPipe 改在 initMediaPipe() 裡動態載入,CDN 失敗時才能顯示錯誤畫面
 
 import { initMouthMode, startMouthDetection, stopMouthDetection, resumeAudio, setMicStatus } from './mode_mouth.js';
 import { startVoiceDetection,stopVoiceDetection ,voiceConfig,stopTfjsDetection,initTfjsVoice,startTfjsDetection} from './mode_voice.js';
 import { initTongueMode,startTongueDetection} from './mode_tongue.js';
-import { sendGameStats } from './api_client.js';
+import { sendGameStats, isRetryable, queuePendingStats, flushPendingStats, pingApi } from './api_client.js';
 import { openHistory } from './history_view.js';
+import { startFaceTracking } from './face_tracker.js';
 
 // ==========================================
 // 全域變數匯出
@@ -63,9 +64,12 @@ async function startSystem() {
     await initMouthMode();
     // await initTfjsVoice();
     await initTongueMode();
-    
-    // 系統載入完成後，立刻啟動背景頭部/嘴部追蹤，永遠不關閉 
-    startMouthDetection(); 
+
+    // 全遊戲共用一條臉部偵測迴圈,各模式只接收結果
+    startFaceTracking(faceLandmarker, videoElement);
+
+    // 系統載入完成後，立刻啟動背景頭部/嘴部追蹤，永遠不關閉
+    startMouthDetection();
     startTongueDetection();
 
     //隱藏請稍候提示,顯示開始遊戲按鈕
@@ -75,6 +79,7 @@ async function startSystem() {
 async function initMediaPipe(){
     console.log("正在載入 MediaPipe 臉部追蹤與語音辨識模組...");
     //載入MediaPipe
+        const { FaceLandmarker, FilesetResolver } = await import("https://cdn.skypack.dev/@mediapipe/tasks-vision@0.10.3");
         const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
         faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
             baseOptions: {
@@ -217,8 +222,7 @@ export async function initCamera() {
         });
     } catch (err) {
         console.error("❌ 無法取得攝影機或麥克風權限", err);
-        alert("請允許使用攝影機與麥克風才能進行遊戲！");
-        throw err; // 把錯誤往上丟，阻止後續載入
+        throw err; // 把錯誤往上丟，阻止後續載入，由 showInitError 顯示原因
     }
 }
 
@@ -400,6 +404,7 @@ window.endGame = endGame;
 
 // 📖 修復：定義新手教學的專屬順序 (ㄚ、ㄧ、ㄨ 循環 3 次，共 9 題)
 let tutorialIndex = 0;
+let turnToken = 0; // 每出一題 +1,用來辨識語音解鎖事件是不是屬於目前這一題
 const TUTORIAL_SEQUENCE = ["ㄚ", "ㄧ", "ㄨ", "ㄚ", "ㄧ", "ㄨ", "ㄚ", "ㄧ", "ㄨ"];
 
 function startGame(mode) {
@@ -410,9 +415,10 @@ function startGame(mode) {
     currentDifficulty = mode; 
     isGameRunning = true;
     isTutorialLocked = (mode === "tutorial"); 
-    tutorialIndex = 0; 
-    
+    tutorialIndex = 0;
+
     bgm.play().catch(e => {});
+    pingApi(); // 遊戲進行中先喚醒 Azure 後端,結算時就不會撞上冷啟動
 
     const micBtn = document.getElementById("toggleMicBtn");
     const isMicOff = micBtn && micBtn.classList.contains('off');
@@ -589,21 +595,37 @@ function showToast(text, type = 'info') {
     }
 }
 
+// Azure App Service + SQL 冷啟動可能要 30~60 秒,分段重試涵蓋整個喚醒時間
+const UPLOAD_RETRY_DELAYS = [5000, 15000, 30000];
+
 async function uploadStatsWithToast(payload) {
+    // 固定遊玩時間,重試或日後補傳都用同一個時間
+    payload = { ...payload, playedAt: new Date().toISOString() };
+
     showToast('📤 上傳結算中…', 'info');
     let res = await sendGameStats(payload);
-    // Azure SQL 冷啟動常見:第一次 500 / DB 沒喚醒,等 3 秒自動重試一次
-    if (!res.ok) {
-        showToast('🔄 上傳失敗,5 秒後重試…', 'info');
-        await new Promise(r => setTimeout(r, 5000));
+    for (let i = 0; i < UPLOAD_RETRY_DELAYS.length && isRetryable(res); i++) {
+        showToast(`🔄 伺服器喚醒中,${UPLOAD_RETRY_DELAYS[i] / 1000} 秒後重試(${i + 1}/${UPLOAD_RETRY_DELAYS.length})…`, 'info');
+        await new Promise(r => setTimeout(r, UPLOAD_RETRY_DELAYS[i]));
         res = await sendGameStats(payload);
     }
     if (res.ok) {
         showToast(`✅ 上傳成功 (#${res.id ?? '?'})`, 'success');
+    } else if (isRetryable(res)) {
+        // 重試都失敗:存到本機,下次開啟遊戲時自動補傳,紀錄不會遺失
+        queuePendingStats(payload);
+        showToast('⚠️ 暫時連不上伺服器,結算已存在本機,下次開啟遊戲會自動補傳', 'error');
     } else {
         const reason = res.error ? `:${res.error.slice(0, 80)}` : res.status ? ` (HTTP ${res.status})` : '';
         showToast(`❌ 上傳失敗${reason}`, 'error');
     }
+}
+
+// 開啟遊戲時補傳之前沒送出的結算(先喚醒後端再送)
+async function flushPendingWithToast() {
+    await pingApi();
+    const sent = await flushPendingStats();
+    if (sent > 0) showToast(`✅ 已補傳 ${sent} 筆之前未送出的結算`, 'success');
 }
 
 // ==========================================
@@ -733,7 +755,8 @@ function startTurnTimer() {
     } else if (currentTrainingMode === 'tongue') {
         lockThreshold = 4;
     }
-    
+
+    const myTurn = ++turnToken;
     if (currentDifficulty === "tutorial" && tutorialIndex < lockThreshold) {
         //處於教學模式，且關卡還沒超過門檻，嚴格鎖定防搶拍
         isTutorialLocked = true; 
@@ -747,11 +770,17 @@ function startTurnTimer() {
                 currentBubble.classList.add("locked");
             }
         }
-        utterance.onend = () => {
+        const unlock = () => {
+            // 上一題被 cancel() 的語音也會觸發 onend/onerror,不能拿來解鎖新的題目
+            if (myTurn !== turnToken) return;
             isTutorialLocked = false; // 語音乖乖唸完後，才解鎖讓玩家動作
             if (currentBubble) currentBubble.classList.remove("locked");
             if (stone) stone.classList.remove("locked");
         };
+        utterance.onend = unlock;
+        utterance.onerror = unlock; // 沒有中文語音包、被瀏覽器擋下時會走 onerror
+        // iOS / 部分 Android 可能完全不觸發 onend,時間到就強制解鎖,避免永遠卡在 🚫
+        setTimeout(unlock, Math.max(2500, spokenText.length * 350) + 1500);
         // ✅ 只有在教學模式，且遊戲真的在跑，才說話
         if (isGameRunning) {
             window.speechSynthesis.speak(utterance);
@@ -885,10 +914,47 @@ function askPlayerName() {
   });
 }
 
+// 載入失敗時把「正在召喚…」換成原因 + 重新整理按鈕,不再卡在載入畫面
+function showInitError(err) {
+  const loading = document.getElementById('loading-overlay');
+  if (!loading) return;
+
+  let msg = '載入失敗,請確認網路連線正常後重新整理。';
+  if (err?.name === 'NotAllowedError' || err?.name === 'SecurityError') {
+    msg = '需要攝影機與麥克風權限才能進行遊戲。請在瀏覽器網址列旁允許權限後,重新整理頁面。';
+  } else if (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError') {
+    msg = '找不到攝影機或麥克風,請確認裝置已連接後重新整理。';
+  } else if (err?.name === 'NotReadableError') {
+    msg = '攝影機或麥克風正在被其他程式使用,請先關閉其他視訊程式後重新整理。';
+  }
+
+  loading.innerHTML = '';
+  loading.style.display = '';
+  loading.style.flexDirection = 'column';
+  loading.style.gap = '20px';
+  loading.style.padding = '24px';
+  loading.style.textAlign = 'center';
+
+  const text = document.createElement('div');
+  text.textContent = '😢 ' + msg;
+  const retry = document.createElement('button');
+  retry.textContent = '🔄 重新整理';
+  retry.addEventListener('click', () => location.reload());
+  loading.append(text, retry);
+}
+
 // 進首頁前先拿到名字,再啟動 3D / MediaPipe / 模型載入
 (async () => {
+  // 玩家輸入名字的同時,先喚醒後端並補傳上次沒送出的結算
+  flushPendingWithToast();
+
   await askPlayerName();
   const loading = document.getElementById('loading-overlay');
   if (loading) loading.style.display = '';   // 還原 CSS 預設樣式
-  startSystem();
+  try {
+    await startSystem();
+  } catch (err) {
+    console.error('❌ 系統初始化失敗:', err);
+    showInitError(err);
+  }
 })();
