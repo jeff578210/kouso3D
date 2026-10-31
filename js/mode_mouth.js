@@ -1,7 +1,8 @@
 // js/mode_mouth.js
 import * as THREE from 'three';
-import { currentVrm, currentTrainingMode, isGameRunning, currentDifficulty, DIFFICULTY_CONFIG, poseQueue, isTutorialLocked, triggerResult,globalStream} from './app.js';
+import { currentVrm, currentTrainingMode, isGameRunning, currentDifficulty, DIFFICULTY_CONFIG, poseQueue, isTutorialLocked, triggerResult} from './app.js';
 import { onFaceFrame } from './face_tracker.js';
+import { isMicOpen, readVolume, noiseFloor, updateThresholdLine } from './audio.js';
 
 let isDetecting = false;
 
@@ -16,38 +17,7 @@ const MAX_DT = 250;
 
 // 麥克風音量偵測
 let smoothedVolume = 0;
-export let audioContext;
-export let analyser;
-export let dataArray;
-export let isMicEnabled = false;
-
-export function resumeAudio() {
-    if (audioContext && audioContext.state === 'suspended') {
-        audioContext.resume().then(() => console.log("🔊 音訊系統已成功喚醒！"));
-    }
-}
-
-// 初始化麥克風音量分析
-export async function initMouthMode() {
-
-
-    //做 音量跳動條 或是判斷玩家 有沒有發出聲音
-    try {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();  //Web Audio元件
-        analyser = audioContext.createAnalyser(); //頻譜分析元件 音量大小、頻率高低轉換成數據
-        const source = audioContext.createMediaStreamSource(globalStream); //音訊來源
-        source.connect(analyser);//音源連接分析元件
-        analyser.fftSize = 256; //分析解析度頻率
-        dataArray = new Uint8Array(analyser.frequencyBinCount);
-        isMicEnabled = true;
-
-    } catch (err) {
-        console.error("無法取得攝影機或麥克風權限", err);
-        isMicEnabled = false;
-    }
-
-    console.log("✅ 嘴型模式初始化完成");
-}
+export let isMicEnabled = false; // 麥克風本身由 audio.js 按需開關;這裡只記錄「語音判定」開關
 
 export function startMouthDetection() {
     if (isDetecting) return;
@@ -72,7 +42,7 @@ export function setMicStatus(status) {
             micBtn.classList.add('off');
         }
     }
-    if (!status && analyser) {
+    if (!status) {
         smoothedVolume = 0;
         const meterFill = document.getElementById("meter-fill");
         if (meterFill) meterFill.style.width = "0%";
@@ -85,18 +55,17 @@ function handleFaceFrame(results, now) {
     lastTime = now;
 
     // 1. 全域音量計算與 UI
-    if (isMicEnabled && analyser) {
-        analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+    if (isMicEnabled && isMicOpen()) {
+        const volume = readVolume();
         // 依實際間隔換算平滑係數,讓反應速度跟原本 60fps 時一樣,不受鏡頭幀率影響
         const k = 1 - Math.pow(0.8, dt / 16.7);
-        smoothedVolume = smoothedVolume * (1 - k) + (sum / dataArray.length) * k;
+        smoothedVolume = smoothedVolume * (1 - k) + volume * k;
 
         const meterFill = document.getElementById("meter-fill");
         if (meterFill && currentDifficulty !== "easy" && currentTrainingMode === 'mouth') {
             meterFill.style.width = Math.min((smoothedVolume / 80) * 100, 100) + "%";
             meterFill.style.backgroundColor = "#3498db";
+            updateThresholdLine(DIFFICULTY_CONFIG[currentDifficulty].volThreshold);
         }
     }
 
@@ -172,7 +141,8 @@ function handleFaceFrame(results, now) {
         let isVoiceMatched = true;
         if (isMicEnabled && currentDifficulty !== "easy") {
             // 不再檢查字有沒有唸對，只要麥克風有收到夠大的聲音就給過
-            isVoiceMatched = (smoothedVolume > conf.volThreshold);
+            // (扣掉背景噪音:被收進來的背景音樂不算玩家的聲音)
+            isVoiceMatched = (smoothedVolume > conf.volThreshold + noiseFloor);
         }
 
         const hintMessage = document.getElementById("hint-message");

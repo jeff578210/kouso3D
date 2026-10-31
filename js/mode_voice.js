@@ -1,6 +1,6 @@
 // js/mode_voice.js
 import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,getVolumeLevel} from './app.js';
-import { analyser, dataArray, isMicEnabled } from './mode_mouth.js';
+import { isMicOpen, readVolume, noiseFloor, updateThresholdLine } from './audio.js';
 import { onFaceFrame } from './face_tracker.js';
 
 let isDetecting = false; //檢查遊戲有沒有再進行
@@ -134,12 +134,10 @@ export function stopVoiceDetection() {
 function handleFaceFrame(results) {
     if (!isDetecting || currentTrainingMode !== 'voice') return;
 
-    let currentVolume
-    if (analyser) {
-        analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-        currentVolume = sum / dataArray.length;
+    let currentVolume = 0;
+    let volumeLevel = getVolumeLevel();
+    if (isMicOpen()) {
+        currentVolume = readVolume();
 
         // 🌟 核心修復 3：改抓正確的 ID `meter-fill`
         const meterFill = document.getElementById("meter-fill");
@@ -147,6 +145,7 @@ function handleFaceFrame(results) {
             meterFill.style.width = Math.min((currentVolume / 80) * 100, 100) + "%";
             meterFill.style.backgroundColor = "#e74c3c"; // 發聲模式專屬的紅色音量條
         }
+        updateThresholdLine(volumeLevel);
     }
 
     let jawOpen = 0, mouthPucker = 0, mouthStretch = 0, mouthSmile = 0, mouthFunnel = 0;
@@ -155,14 +154,14 @@ function handleFaceFrame(results) {
         const shapes = results.faceBlendshapes[0].categories;
         jawOpen = shapes.find(s => s.categoryName === "jawOpen")?.score || 0;
     }
-    let volumeLevel = getVolumeLevel();
-    if (currentVolume > volumeLevel) {
+    // 門檻都以背景噪音為基準(被收進來的背景音樂、音效不算玩家的聲音)
+    if (currentVolume > volumeLevel + noiseFloor) {
         if (!isWaitingForNextSound && jawOpen > 0.1 && !hitCooldown) {
             triggerStoneHit();
             isWaitingForNextSound = true; // 聲音上鎖
         }
-    } 
-    else if (currentVolume < 10) { 
+    }
+    else if (currentVolume < noiseFloor + volumeLevel * 0.4) { // 聲音降回背景音量附近才解鎖,吵雜環境也不會卡住
         if (isWaitingForNextSound && !hitCooldown) {
             isWaitingForNextSound = false;
         }

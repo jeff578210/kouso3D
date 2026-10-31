@@ -6,12 +6,13 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 // MediaPipe 改在 initMediaPipe() 裡動態載入,CDN 失敗時才能顯示錯誤畫面
 
-import { initMouthMode, startMouthDetection, stopMouthDetection, resumeAudio, setMicStatus } from './mode_mouth.js';
+import { startMouthDetection, stopMouthDetection, setMicStatus } from './mode_mouth.js';
 import { startVoiceDetection,stopVoiceDetection ,voiceConfig,stopTfjsDetection,initTfjsVoice,startTfjsDetection} from './mode_voice.js';
 import { initTongueMode,startTongueDetection} from './mode_tongue.js';
 import { sendGameStats, isRetryable, queuePendingStats, flushPendingStats, pingApi } from './api_client.js';
 import { openHistory } from './history_view.js';
 import { startFaceTracking } from './face_tracker.js';
+import { resumeAudio, openMic, closeMic, playSuccessSound, updateThresholdLine } from './audio.js';
 
 // ==========================================
 // 全域變數匯出
@@ -24,7 +25,7 @@ export let poseQueue = [];
 export let isTutorialLocked = false;
 export let accumulatedHoldTime = 0;
 export let videoElement;//全域的攝影機
-export let globalStream;//影像與聲音源頭,後續運算都可以從這邊拿資料
+export let globalStream;//攝影機影像來源(麥克風改由 audio.js 在需要時才開)
 export let faceLandmarker;//MediaPipe元件
 
 //各等級辨識參數
@@ -45,14 +46,14 @@ export let gameStats = {};
 export let playerName = '';   // 由開頭的玩家名稱輸入框設定;會跟結算統計一起送到 API
 
 // 音效設定
-// 🔥 偵測是否為行動裝置(用於降低 BGM 音量,避免外放被麥克風收回造成回音)
+// 🔥 偵測是否為行動裝置(手機喇叭離麥克風近,BGM 稍微小聲一點)
 const IS_MOBILE = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
                   || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform)); // iPad iOS 13+
 const bgm = new Audio('./bgm.mp3');
 bgm.loop = true;
 bgm.preload = 'auto';
-// 手機外放會被麥克風收音造成回音,大幅降低音量
-bgm.volume = IS_MOBILE ? 0.35 : 0.8;
+// 被麥克風收進去的音樂已由 audio.js 的背景噪音追蹤扣除,不必再把手機音量壓得很低
+bgm.volume = IS_MOBILE ? 0.6 : 0.8;
 
 // ==========================================
 // 1. 初始化系統與 3D 渲染
@@ -61,7 +62,6 @@ async function startSystem() {
     initThreeJS(); 
     await initMediaPipe();
     await initCamera();
-    await initMouthMode();
     // await initTfjsVoice();
     await initTongueMode();
 
@@ -93,68 +93,6 @@ async function initMediaPipe(){
         });
 }
 
-// 🔥 PeerConnection Loopback Hack:
-// 修正 Chromium 已知問題 — 當 MediaStream 被 Web Audio 的 createMediaStreamSource 使用時,
-// 瀏覽器會自動把回音消除 (AEC) 關掉。透過把音訊軌經過一個本地 RTCPeerConnection
-// 「來回繞一圈」,可以強制保留 AEC 處理過的音訊。
-// 參考: https://bugs.chromium.org/p/chromium/issues/detail?id=687574
-async function applyAECLoopback(originalStream) {
-    try {
-        const audioTracks = originalStream.getAudioTracks();
-        if (!audioTracks.length || typeof RTCPeerConnection === 'undefined') {
-            return originalStream;
-        }
-
-        const offerOptions = {
-            offerToReceiveAudio: false,
-            offerToReceiveVideo: false,
-        };
-        const rtcConfig = { iceServers: [] };
-
-        const senderPC = new RTCPeerConnection(rtcConfig);
-        const receiverPC = new RTCPeerConnection(rtcConfig);
-
-        // ICE 互相轉送
-        senderPC.onicecandidate = e => e.candidate && receiverPC.addIceCandidate(e.candidate).catch(()=>{});
-        receiverPC.onicecandidate = e => e.candidate && senderPC.addIceCandidate(e.candidate).catch(()=>{});
-
-        // 把音訊軌加進 sender (只送音訊,影像仍走原 stream)
-        audioTracks.forEach(track => senderPC.addTrack(track, originalStream));
-
-        // 接收端收到的軌道組成回路 stream
-        const loopbackStream = new MediaStream();
-        const waitTrack = new Promise(resolve => {
-            receiverPC.ontrack = (e) => {
-                loopbackStream.addTrack(e.track);
-                resolve();
-            };
-        });
-
-        // SDP 交握
-        const offer = await senderPC.createOffer(offerOptions);
-        await senderPC.setLocalDescription(offer);
-        await receiverPC.setRemoteDescription(offer);
-        const answer = await receiverPC.createAnswer();
-        await receiverPC.setLocalDescription(answer);
-        await senderPC.setRemoteDescription(answer);
-
-        // 等接收端真的拿到 track
-        await Promise.race([
-            waitTrack,
-            new Promise(r => setTimeout(r, 1500))
-        ]);
-
-        // 把原始的影像軌也合進新 stream (給 video 元素用)
-        originalStream.getVideoTracks().forEach(t => loopbackStream.addTrack(t));
-
-        console.log('🛡️ AEC Loopback 已啟用,回音消除將維持有效');
-        return loopbackStream;
-    } catch (err) {
-        console.warn('AEC Loopback 失敗,回退到原始 stream:', err);
-        return originalStream;
-    }
-}
-
 export async function initCamera() {
     console.log("📷 正在啟動全域攝影機與麥克風...");
 
@@ -173,7 +111,9 @@ export async function initCamera() {
     videoElement.muted = true;
     videoElement.volume = 0;
 
-    // 2. 要求硬體權限,明確開啟回音消除、噪音抑制、自動增益
+    // 2. 一次問完攝影機與麥克風權限。麥克風拿到授權後立刻關掉:
+    //    一直開著(尤其是開回音消除)會讓裝置切進通話模式,背景音樂和音效會被系統壓小、斷斷續續。
+    //    之後只在需要聽聲音的遊戲,由 audio.js 的 openMic() 重新打開。
     try {
         const constraints = {
             video: {
@@ -181,33 +121,12 @@ export async function initCamera() {
                 width:  { ideal: 640 },
                 height: { ideal: 480 }
             },
-            audio: {
-                echoCancellation: { ideal: true },
-                noiseSuppression: { ideal: true },
-                autoGainControl:  { ideal: true },
-                // 強制使用瀏覽器內建的較強 AEC 模式 (僅 Chromium 系)
-                googEchoCancellation: true,
-                googEchoCancellation2: true,
-                googNoiseSuppression: true,
-                googNoiseSuppression2: true,
-                googAutoGainControl: true,
-                googHighpassFilter: true,
-                channelCount: 1, // 單聲道更利於 AEC
-                sampleRate:   { ideal: 48000 }
-            }
+            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
         };
-        const rawStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-        // 🔥 用 loopback hack 確保即使後面接 Web Audio,AEC 仍生效
-        globalStream = await applyAECLoopback(rawStream);
-
-        // 印出實際生效的音訊限制條件,方便除錯
-        const aSettings = globalStream.getAudioTracks()[0]?.getSettings?.() || {};
-        console.log('🎙️ 音訊實際設定:', {
-            echoCancellation: aSettings.echoCancellation,
-            noiseSuppression: aSettings.noiseSuppression,
-            autoGainControl:  aSettings.autoGainControl,
-            sampleRate:       aSettings.sampleRate
+        globalStream = await navigator.mediaDevices.getUserMedia(constraints);
+        globalStream.getAudioTracks().forEach(track => {
+            track.stop();
+            globalStream.removeTrack(track);
         });
 
         videoElement.srcObject = globalStream;
@@ -216,7 +135,7 @@ export async function initCamera() {
         return new Promise((resolve) => {
             videoElement.onloadedmetadata = () => {
                 videoElement.play().catch(()=>{});
-                console.log("✅ 全域攝影機與麥克風啟動完成");
+                console.log("✅ 全域攝影機啟動完成(麥克風已授權,需要時才開啟)");
                 resolve();
             };
         });
@@ -356,7 +275,7 @@ document.getElementById("mode-voice")?.addEventListener('click', () => switchTra
 document.getElementById("mode-tongue")?.addEventListener('click', () => switchTrainingMode('tongue'));
 
 function switchTrainingMode(mode) {
-    if (isGameRunning) return; //遊戲進行中不能更換模式
+    if (isGameRunning || isStartingGame) return; //遊戲進行中(或正在等麥克風權限)不能更換模式
     stopAllEngines(); //請除所有的語音偵測辨識冷卻狀態
     currentTrainingMode = mode;
     console.log(`切換至訓練模式：${mode}`);
@@ -387,14 +306,18 @@ document.getElementById("toggleMicBtn")?.addEventListener('click', (e) => {
         btn.innerText = '🎙️ 語音判定：關閉';
         btn.classList.add('off');
         setMicStatus(false);
+        closeMic(); // 不用聽聲音就關掉麥克風,音樂與音效恢復正常音量
         // 👇 改用 visibility 隱藏，保留空間
-        if (meterContainer) meterContainer.style.visibility = "hidden"; 
+        if (meterContainer) meterContainer.style.visibility = "hidden";
     } else {
         btn.innerText = '🎙️ 語音判定：開啟';
         btn.classList.remove('off');
-        setMicStatus(true);
-        // 👇 改用 visibility 顯示
-        if (meterContainer && isGameRunning) meterContainer.style.visibility = "visible"; 
+        openMic().then(ok => {
+            if (!isGameRunning) return;
+            setMicStatus(ok); // 打不開(沒權限/沒裝置)就維持關閉,不會卡在「聲音不夠大」
+            // 👇 改用 visibility 顯示
+            if (ok && meterContainer) meterContainer.style.visibility = "visible";
+        });
     }
 });
 
@@ -405,23 +328,40 @@ window.endGame = endGame;
 // 📖 修復：定義新手教學的專屬順序 (ㄚ、ㄧ、ㄨ 循環 3 次，共 9 題)
 let tutorialIndex = 0;
 let turnToken = 0; // 每出一題 +1,用來辨識語音解鎖事件是不是屬於目前這一題
+let isStartingGame = false; // 開局時正在等麥克風開啟,避免重複點擊開兩局
 const TUTORIAL_SEQUENCE = ["ㄚ", "ㄧ", "ㄨ", "ㄚ", "ㄧ", "ㄨ", "ㄚ", "ㄧ", "ㄨ"];
 
-function startGame(mode) {
-    // 確保音訊環境啟動
-    import('./mode_mouth.js').then(module => {
-        if(module.resumeAudio) module.resumeAudio(); 
-    });
-    currentDifficulty = mode; 
-    isGameRunning = true;
-    isTutorialLocked = (mode === "tutorial"); 
-    tutorialIndex = 0;
-
+async function startGame(mode) {
+    if (isGameRunning || isStartingGame) return;
+    // 確保音訊環境啟動、音樂開播(必須在點擊當下、任何 await 之前,否則手機會擋自動播放)
+    resumeAudio();
     bgm.play().catch(e => {});
-    pingApi(); // 遊戲進行中先喚醒 Azure 後端,結算時就不會撞上冷啟動
 
+    // 只有需要聽聲音的遊戲才開麥克風:發聲模式一定要;嘴型模式看難度與「語音判定」開關;舌頭模式不開
     const micBtn = document.getElementById("toggleMicBtn");
     const isMicOff = micBtn && micBtn.classList.contains('off');
+    const needsMic = currentTrainingMode === 'voice'
+        || (currentTrainingMode === 'mouth' && DIFFICULTY_CONFIG[mode].requireAudio && !isMicOff);
+    let micReady = false;
+    if (needsMic) {
+        isStartingGame = true;
+        micReady = await openMic();
+        isStartingGame = false;
+        if (!micReady && currentTrainingMode === 'voice') {
+            bgm.pause();
+            const statusDisplay = document.getElementById("status-message");
+            if (statusDisplay) statusDisplay.innerText = "發聲訓練需要麥克風,請允許麥克風權限後再試一次！";
+            return;
+        }
+    }
+
+    currentDifficulty = mode;
+    isGameRunning = true;
+    isTutorialLocked = (mode === "tutorial");
+    tutorialIndex = 0;
+
+    pingApi(); // 遊戲進行中先喚醒 Azure 後端,結算時就不會撞上冷啟動
+
     const isEasyMode = (mode === "easy");
     const isTongueMode = (currentTrainingMode === 'tongue'); 
 
@@ -458,19 +398,14 @@ function startGame(mode) {
         }
         if (meterContainer) {
             meterContainer.style.display = "flex";
-            meterContainer.style.visibility = (isEasyMode || isMicOff) ? "hidden" : "visible";
+            meterContainer.style.visibility = (isEasyMode || !micReady) ? "hidden" : "visible";
         }
-        setMicStatus(!isMicOff);
+        // 初級本來就不判定聲音,不動開關狀態;其他難度依麥克風實際有沒有打開
+        if (!isEasyMode) setMicStatus(micReady);
     }
 
-    let volumeLevel = getVolumeLevel();
-    const thresholdLine = document.getElementById("meter-threshold");
-    if (thresholdLine) {
-        let leftPercentage = (volumeLevel / 80) * 100;
-        leftPercentage = Math.min(leftPercentage, 100);
-        // 更新 CSS 的 left 屬性
-        thresholdLine.style.left = `${leftPercentage}%`;
-    }
+    // 音量條紅線 = 實際過關門檻(遊戲中會隨背景噪音即時更新)
+    updateThresholdLine(currentTrainingMode === 'voice' ? getVolumeLevel() : DIFFICULTY_CONFIG[mode].volThreshold);
 
     initQueue();  //載入題目
     renderBelt(); //渲染畫面
@@ -494,8 +429,9 @@ function endGame() {
     isGameRunning = false;
     isTutorialLocked = false; 
     bgm.pause();
-    window.speechSynthesis.cancel(); 
+    window.speechSynthesis.cancel();
     stopAllEngines();
+    closeMic(); // 回到首頁就關麥克風
     // 隱藏舌頭的冰淇淋
     const ic = document.getElementById("ice-cream-target");
     if (ic) ic.style.display = "none";
@@ -803,6 +739,7 @@ export function triggerResult(isSuccess) {
     const stone = document.getElementById("stone-container");
 
     if (isSuccess) {
+        playSuccessSound(); // 過關音效
         gameStats[poseQueue[0]] && gameStats[poseQueue[0]].success++;//類計成功次數
         if (currentTrainingMode === 'mouth') {
             if(targetBubble) targetBubble.classList.add("pop-animation"); //成功時，泡泡（bubble-0）會播放破裂動畫（pop-animation）。
