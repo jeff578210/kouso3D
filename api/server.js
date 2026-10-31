@@ -40,6 +40,37 @@ const dbConfig = {
   pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
 };
 
+// 簡易頻率限制:每個 IP 每分鐘最多 N 次,防止有人大量灌資料或掃描紀錄(不需額外套件)
+// Azure App Service 的 X-Forwarded-For 是「IP:port」格式,要去掉 port 才能辨識同一個人
+function clientIp(req) {
+  const raw = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '';
+  if (raw.startsWith('[')) return raw.slice(1, raw.indexOf(']'));         // [IPv6]:port
+  return raw.replace(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/, '$1');           // IPv4:port
+}
+
+function rateLimit(maxPerMinute) {
+  const hits = new Map(); // ip -> 這一分鐘內的請求時間
+  setInterval(() => {
+    const cutoff = Date.now() - 60000;
+    for (const [ip, times] of hits) {
+      const recent = times.filter(t => t > cutoff);
+      recent.length ? hits.set(ip, recent) : hits.delete(ip);
+    }
+  }, 60000).unref();
+  return (req, res, next) => {
+    const ip = clientIp(req);
+    const now = Date.now();
+    const recent = (hits.get(ip) || []).filter(t => t > now - 60000);
+    if (recent.length >= maxPerMinute) {
+      res.set('Retry-After', '60');
+      return res.status(429).json({ ok: false, error: '請求太頻繁,請稍後再試' });
+    }
+    recent.push(now);
+    hits.set(ip, recent);
+    next();
+  };
+}
+
 let poolPromise;
 async function getPool() {
   if (!poolPromise) {
@@ -56,18 +87,19 @@ async function getPool() {
 }
 
 // 健康檢查 — 部署後可用 curl 驗證
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', rateLimit(60), async (req, res) => {
   try {
     const pool = await getPool();
     const r = await pool.request().query('SELECT 1 AS ok');
     res.json({ ok: true, db: r.recordset[0].ok === 1 });
   } catch (e) {
-    res.status(503).json({ ok: false, error: e.message });
+    console.error('健康檢查失敗:', e);
+    res.status(503).json({ ok: false, error: '資料庫暫時無法連線' }); // 不把內部錯誤細節回給前端
   }
 });
 
 // 收結算統計
-app.post('/api/game-stats', async (req, res) => {
+app.post('/api/game-stats', rateLimit(30), async (req, res) => {
   const { playerName, mode, difficulty, stats, playedAt } = req.body || {};
 
   // 基本驗證
@@ -98,7 +130,7 @@ app.post('/api/game-stats', async (req, res) => {
       .input('TotalSuccess',    sql.Int,           totalSuccess)
       .input('TotalFail',       sql.Int,           totalFail)
       .input('AchievementRate', sql.Decimal(5, 2), achievementRate)
-      .input('PlayedAt',        sql.DateTime2,     playedAt ? new Date(playedAt) : new Date())
+      .input('PlayedAt',        sql.DateTime2,     isNaN(new Date(playedAt)) ? new Date() : new Date(playedAt))
       .input('RawStatsJson',    sql.NVarChar(sql.MAX), JSON.stringify(stats))
       .query(`
         INSERT INTO GameSessions
@@ -114,31 +146,43 @@ app.post('/api/game-stats', async (req, res) => {
     });
   } catch (e) {
     console.error('插入失敗:', e);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: '寫入失敗,請稍後再試' }); // 不把資料庫錯誤細節回給前端
   }
 });
 
-// 查詢:同一玩家的歷史(可選用,給排行榜/個人頁面)
-app.get('/api/game-stats', async (req, res) => {
-  const player = (req.query.player || '').toString().slice(0, 50);
-  const limit  = Math.min(parseInt(req.query.limit || '20', 10), 100);
+// 查詢:單一玩家的歷史紀錄(「查看我的訓練紀錄」用)。
+// 一定要指定玩家,不再提供「不帶名字就回傳所有人紀錄」的查法
+app.get('/api/game-stats', rateLimit(60), async (req, res) => {
+  const player = (req.query.player || '').toString().trim().slice(0, 50);
+  if (!player) return res.status(400).json({ ok: false, error: '缺少 player 參數' });
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
   try {
     const pool = await getPool();
-    const q = pool.request().input('Limit', sql.Int, limit);
-    let where = '';
-    if (player) { q.input('Player', sql.NVarChar(50), player); where = 'WHERE PlayerName = @Player'; }
-    const r = await q.query(`
-      SELECT TOP (@Limit)
-        Id, PlayerName, Mode, Difficulty,
-        TotalSuccess, TotalFail, AchievementRate,
-        PlayedAt, CreatedAt
-      FROM GameSessions ${where}
-      ORDER BY CreatedAt DESC;
-    `);
+    const r = await pool.request()
+      .input('Limit',  sql.Int,           limit)
+      .input('Player', sql.NVarChar(50),  player)
+      .query(`
+        SELECT TOP (@Limit)
+          Id, PlayerName, Mode, Difficulty,
+          TotalSuccess, TotalFail, AchievementRate,
+          PlayedAt, CreatedAt
+        FROM GameSessions
+        WHERE PlayerName = @Player
+        ORDER BY CreatedAt DESC;
+      `);
     res.json({ ok: true, rows: r.recordset });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    console.error('查詢失敗:', e);
+    res.status(500).json({ ok: false, error: '查詢失敗,請稍後再試' });
   }
+});
+
+// 統一錯誤處理:不把錯誤堆疊回給前端(CORS 拒絕的來源回 403)
+app.use((err, req, res, next) => {
+  console.error('請求錯誤:', err.message);
+  const forbidden = /未允許/.test(err.message || '');
+  const status = forbidden ? 403 : (err.status || 500); // 例:格式錯誤的 JSON 由 express 標成 400
+  res.status(status).json({ ok: false, error: forbidden ? '來源不被允許' : status < 500 ? '請求格式錯誤' : '伺服器錯誤' });
 });
 
 // 注意:Windows App Service (iisnode) 給的 PORT 是具名管道路徑(字串),不是數字。
