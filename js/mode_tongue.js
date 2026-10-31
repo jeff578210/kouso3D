@@ -137,8 +137,6 @@ function handleFaceFrame(results, now) {
         const targetPose = poseQueue[0];
         const conf = DIFFICULTY_CONFIG[currentDifficulty];
 
-        console.log(`[AI 判定] ${detected} (${(highestConfidentProb*100).toFixed(0)}%) | 上:${(smoothedProbs['tongueUp']*100).toFixed(0)} 下:${(smoothedProbs['tongueDown']*100).toFixed(0)} 左:${(smoothedProbs['tongueLeft']*100).toFixed(0)} 右:${(smoothedProbs['tongueRight']*100).toFixed(0)}`);
-
         const isMatched = checkTonguePoseMatch(targetPose, detected, highestConfidentProb, GAME_TRIGGER_THRESHOLD);
         const hintMessage = document.getElementById("hint-message");
         const currentBubble = document.getElementById("bubble-0");
