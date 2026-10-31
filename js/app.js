@@ -462,21 +462,30 @@ function endGame() {
     // 🌟 修復 4：動態生成符合當前模式的結算報表
     const statusDisplay = document.getElementById("status-message");
     if (statusDisplay) {
-        if (currentDifficulty !== "tutorial") { 
+        if (currentDifficulty !== "tutorial") {
+            // 一題都還沒完成就結束:不顯示結算、不上傳,避免 0/0 的紀錄拉低平均達成率
+            let attempts = 0;
+            for (let key in gameStats) attempts += gameStats[key].success + gameStats[key].fail;
+            if (attempts === 0) {
+                statusDisplay.innerText = "這場還沒完成任何題目,不列入訓練紀錄。";
+                return;
+            }
+
             statusDisplay.innerText = "挑戰結束！查看結算：";
             const statsPanel = document.getElementById("stats-panel");
             if (statsPanel) {
                 statsPanel.style.display = "block";
                 let html = '<h3 style="color: #333; text-align: center;">📊 動作達成率統計</h3><ul style="color: #333; font-size: 18px; padding-left: 20px;">';
-                
+
                 for (let key in gameStats) {
+                    let total = gameStats[key].success + gameStats[key].fail;
+                    if (total === 0) continue; // 這場沒出現過的題目不列出
+                    let rate = Math.round((gameStats[key].success / total) * 100);
                     if (currentTrainingMode === 'voice') {
                         // 發聲模式專屬文字
-                        html += `<li style="margin-bottom: 10px;"><strong>${key}</strong>: 成功擊碎 ${gameStats[key].success} 顆巨石</li>`;
+                        html += `<li style="margin-bottom: 10px;"><strong>${key}</strong>: 成功擊碎 ${gameStats[key].success} 顆 / 時間到 ${gameStats[key].fail} 顆 (達成率: ${rate}%)</li>`;
                     } else {
                         // 嘴型與舌頭模式的文字
-                        let total = gameStats[key].success + gameStats[key].fail;
-                        let rate = total > 0 ? Math.round((gameStats[key].success / total) * 100) : 0;
                         html += `<li style="margin-bottom: 10px;"><strong>${key}</strong>: 成功 ${gameStats[key].success} 次 / 失敗 ${gameStats[key].fail} 次 (達成率: ${rate}%)</li>`;
                     }
                 }
@@ -617,6 +626,7 @@ export function renderBelt() {
         const text = document.getElementById("stone-text");
         const hp = document.getElementById("stone-hp");
         voiceConfig.remainingHits = (currentDifficulty === 'tutorial') ? 1 : voiceConfig.MAX_HEALTH;//教學模式血量1
+        voiceConfig.stoneTimeLeft = voiceConfig.STONE_TIME_LIMIT; //新石頭重新計時
         if (stone && text && hp) {
             stone.className = ""; // 瞬間洗掉上一回合的爆炸或震動動畫
             text.innerText = poseQueue[0]; // 直接從陣列拿最新的題目
@@ -752,6 +762,7 @@ export function triggerResult(isSuccess) {
     } else {
         gameStats[poseQueue[0]] && gameStats[poseQueue[0]].fail++; //類計失敗次數
         if(targetBubble) targetBubble.classList.add("fade-animation"); //泡泡失敗特效
+        if (currentTrainingMode === 'voice' && stone) stone.classList.add("fade-animation"); //發聲模式時間到,石頭淡出
     }
 
     if (conveyorBelt) { //輸送帶推進動畫,將泡泡向左移動

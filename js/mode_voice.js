@@ -1,5 +1,5 @@
 // js/mode_voice.js
-import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,getVolumeLevel} from './app.js';
+import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,getVolumeLevel, DIFFICULTY_CONFIG} from './app.js';
 import { isMicOpen, readVolume, noiseFloor, updateThresholdLine } from './audio.js';
 import { onFaceFrame } from './face_tracker.js';
 
@@ -8,6 +8,10 @@ let isFrameHandlerRegistered = false; //只向共用臉部偵測註冊一次,避
 let currentTargetSyllable; //當前題目
 let hitCooldown = false; //防止連擊
 let isWaitingForNextSound = false; //防止連擊
+let loudMs = 0; //聲音連續超過門檻多久(ms)
+const MIN_LOUD_MS = 60; //至少持續這麼久才算一次敲擊。只擋得住極短的雜訊:瀏覽器音量分析會讓大聲突波拖尾約 0.3 秒,較長的突波仍會通過
+let lastTime = performance.now();
+const MAX_DT = 250; //兩張畫面的最大間隔(ms):切換分頁回來時避免計時器一次跳好幾秒
 let recognition = null;  //語音偵測物件
 let recognizer; //擴充庫物件
 let isTfjsRunning = false; //Teachable Machine是否執行中
@@ -18,6 +22,8 @@ export const voiceConfig = {
     lockThreshold:4, //設定教學模式前面多少題要聽完語音才能動作
     MAX_HEALTH : 5,//預設石頭最大血量
     remainingHits : 1, //預設石頭當前血量
+    STONE_TIME_LIMIT : 10000, //每顆石頭的限時(ms),時間到沒敲碎就算失敗(教學模式不限時)
+    stoneTimeLeft : 10000, //目前這顆石頭剩下的時間
     stoneAnimState : "normal"// 記錄石頭動畫狀態 "normal", "hit", "explode"
 };
 
@@ -131,7 +137,9 @@ export function stopVoiceDetection() {
     if (recognition) { try { recognition.stop(); } catch(e){} }
 }
 
-function handleFaceFrame(results) {
+function handleFaceFrame(results, now) {
+    const dt = Math.min(now - lastTime, MAX_DT);
+    lastTime = now;
     if (!isDetecting || currentTrainingMode !== 'voice') return;
 
     let currentVolume = 0;
@@ -156,22 +164,48 @@ function handleFaceFrame(results) {
     }
     // 門檻都以背景噪音為基準(被收進來的背景音樂、音效不算玩家的聲音)
     if (currentVolume > volumeLevel + noiseFloor) {
-        if (!isWaitingForNextSound && jawOpen > 0.1 && !hitCooldown) {
+        loudMs += dt;
+        // 張嘴 + 聲音持續一小段時間才算(閉著嘴時的拍手、碰撞聲本來就不會觸發)
+        if (!isWaitingForNextSound && jawOpen > 0.1 && !hitCooldown && loudMs >= MIN_LOUD_MS) {
             triggerStoneHit();
             isWaitingForNextSound = true; // 聲音上鎖
         }
     }
-    else if (currentVolume < noiseFloor + volumeLevel * 0.4) { // 聲音降回背景音量附近才解鎖,吵雜環境也不會卡住
-        if (isWaitingForNextSound && !hitCooldown) {
-            isWaitingForNextSound = false;
+    else {
+        loudMs = 0;
+        if (currentVolume < noiseFloor + volumeLevel * 0.4) { // 聲音降回背景音量附近才解鎖,吵雜環境也不會卡住
+            if (isWaitingForNextSound && !hitCooldown) {
+                isWaitingForNextSound = false;
+            }
         }
+    }
+
+    updateStoneTimer(dt);
+}
+
+// ⏱️ 每顆石頭限時:時間到還沒敲碎就算失敗(教學模式不限時;石頭碎掉等動畫時也不計時)
+function updateStoneTimer(dt) {
+    const conf = DIFFICULTY_CONFIG[currentDifficulty];
+    if (!isGameRunning || conf.isTutorial || voiceConfig.remainingHits <= 0) return;
+
+    voiceConfig.stoneTimeLeft -= dt;
+    const stone = document.getElementById("stone-container");
+    const hp = document.getElementById("stone-hp");
+    const secondsLeft = Math.max(0, Math.ceil(voiceConfig.stoneTimeLeft / 1000));
+    if (hp) hp.innerText = `剩餘 ${voiceConfig.remainingHits} 次 · ⏱️ ${secondsLeft} 秒`;
+    if (stone) stone.classList.toggle("stone-warning", voiceConfig.stoneTimeLeft <= 3000);
+
+    if (voiceConfig.stoneTimeLeft <= 0) {
+        voiceConfig.remainingHits = 0; // 換下一顆石頭前,這顆不能再被敲到
+        if (stone) stone.classList.remove("stone-warning");
+        triggerResult(false);
     }
 }
 
 
 
 function triggerStoneHit() {
-    if (hitCooldown) return; 
+    if (hitCooldown || voiceConfig.remainingHits <= 0) return; // 石頭已碎或時間到,等下一顆
     hitCooldown = true;
     voiceConfig.remainingHits--; //將這顆石頭的剩餘需要打擊次數減 1。
     const stone = document.getElementById("stone-container");
