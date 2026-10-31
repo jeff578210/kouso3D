@@ -5,7 +5,7 @@
 // ✦ 原版備份在 mode_tongue.js.bak
 
 import { currentVrm, currentTrainingMode, isGameRunning, currentDifficulty,
-         DIFFICULTY_CONFIG, poseQueue, isTutorialLocked, triggerResult } from './app.js';
+         DIFFICULTY_CONFIG, poseQueue, isTutorialLocked, triggerResult, world } from './app.js';
 import { TongueDirectionDetector } from './tongue_direction.js';
 import { onFaceFrame } from './face_tracker.js';
 // 使用 index.html 上載入的全域 tf(已升級為 TF 4.x);speech-commands 也共用這個版本
@@ -139,7 +139,6 @@ function handleFaceFrame(results, now) {
 
         const isMatched = checkTonguePoseMatch(targetPose, detected, highestConfidentProb, GAME_TRIGGER_THRESHOLD);
         const hintMessage = document.getElementById("hint-message");
-        const currentBubble = document.getElementById("bubble-0");
 
         if (targetPose !== lastTarget) {
           lastTarget = targetPose;
@@ -153,21 +152,17 @@ function handleFaceFrame(results, now) {
             hintMessage.style.color = "#8e44ad";
           }
           holdTime = 0;
-          if (currentBubble) currentBubble.style.background = "";
+          world.setProgress(0);
         } else {
           if (isMatched) {
             if (hintMessage) {
               hintMessage.innerText = "👍 舌頭方向正確!請保持住!";
               hintMessage.style.color = "#f1c40f";
             }
-            if (currentBubble) currentBubble.classList.remove("warning-blink");
+            world.setWarning(false);
 
             holdTime += dt;
-            let progress = Math.min(holdTime / conf.holdDuration, 1) * 100;
-            if (currentBubble) {
-              currentBubble.style.background = `linear-gradient(to top, #2ecc71 ${progress}%, #3498db ${progress}%)`;
-              currentBubble.style.transform = "scale(1.15)";
-            }
+            world.setProgress(holdTime / conf.holdDuration); // 目標圈的綠色進度弧,泡泡也漸漸變綠
 
             if (holdTime >= conf.holdDuration) {
               triggerResult(true);
@@ -182,11 +177,11 @@ function handleFaceFrame(results, now) {
             }
             if (!conf.accumulateProgress) {
               holdTime = 0;
-              if (currentBubble) { currentBubble.style.background = ""; currentBubble.style.transform = "scale(1)"; }
+              world.setProgress(0);
             }
             if (!conf.isTutorial) {
               turnTimeLeft -= dt;
-              if (turnTimeLeft <= 2000 && currentBubble) currentBubble.classList.add("warning-blink");
+              if (turnTimeLeft <= 2000) world.setWarning(true); // 剩 2 秒:泡泡與目標圈閃紅
               if (turnTimeLeft <= 0) {
                 triggerResult(false);
                 lastTarget = "";

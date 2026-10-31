@@ -113,77 +113,6 @@ body {
     transition: width linear, background-color 0.3s;
 }
 
-/* 水平輸送帶與判定區 */
-.conveyor-wrapper {
-    position: relative; width: 100%; max-width: 550px; height: 150px;
-    min-width: 0;       /* 🔥 關鍵修復：解決 Flexbox 子元素撐爆父元素寬度的 bug */
-    flex-shrink: 0;     /* 🔥 確保外框高度與寬度絕對不會被擠壓變形 */
-    box-sizing: border-box;
-    display: flex; align-items: center; overflow: hidden;
-    background: rgba(255, 255, 255, 0.3); 
-    backdrop-filter: blur(12px); border: 2px solid rgba(255, 255, 255, 0.8);
-    border-radius: 75px;
-    box-shadow: inset 0 5px 15px rgba(255,255,255,0.5), 0 10px 30px rgba(0,0,0,0.1);
-    margin-bottom: 40px;
-}
-
-.target-zone {
-    position: absolute; left: 20px; top: 15px;
-    width: 120px; height: 120px;
-    border: 4px dashed rgba(255, 255, 255, 0.9); border-radius: 50%;
-    box-sizing: border-box; z-index: 1;
-    box-shadow: 0 0 15px rgba(255,255,255,0.5);
-}
-
-#conveyor-belt {
-    display: flex; align-items: center; gap: 20px;
-    padding-left: 25px; 
-    z-index: 2;
-    width: max-content; /* 🔥 確保內部泡泡能自由展開，不再硬扯外面的白色軌道框 */
-}
-
-/* 泡泡設計 */
-.bubble {
-    width: 80px; height: 80px; border-radius: 50%;
-    background: rgba(255, 255, 255, 0.6); 
-    border: 2px solid rgba(255, 255, 255, 0.9);
-    display: flex; justify-content: center; align-items: center;
-    font-size: 38px; /* 注音稍微放大 */
-    font-weight: bold; color: #7f8c8d;
-    flex-shrink: 0; transition: all 0.3s cubic-bezier(0.25, 1.5, 0.5, 1);
-    box-shadow: 0 8px 20px rgba(0,0,0,0.08);
-    text-shadow: 1px 1px 2px rgba(255,255,255,0.8); /* 微微的反光感 */
-}
-
-.bubble.current {
-    width: 105px; height: 105px; font-size: 55px; color: white;
-    
-    /* 🔥 這裡改回你原本熟悉的藍色漸層 */
-    background: linear-gradient(135deg, #3498db, #2980b9); 
-    border: 3px solid #fff;
-    
-    /* 🔥 陰影的顏色也配合改成藍色系，維持立體發光感 */
-    box-shadow: 0 10px 25px rgba(52, 152, 219, 0.5), inset 0 5px 10px rgba(255,255,255,0.4);
-    
-    transform: scale(1.05);
-    text-shadow: 2px 2px 5px rgba(0,0,0,0.2); 
-}
-
-/* 泡泡破裂動畫 (成功) */
-@keyframes pop {
-    0% { transform: scale(1); opacity: 1; }
-    40% { transform: scale(1.3); opacity: 0.8; }
-    100% { transform: scale(1.5); opacity: 0; filter: blur(4px); }
-}
-.pop-animation { animation: pop 0.3s forwards; }
-
-/* 泡泡消散動畫 (超時失敗) */
-@keyframes fade-miss {
-    0% { transform: scale(1); opacity: 1; background: #e74c3c;}
-    100% { transform: scale(0.8); opacity: 0; }
-}
-.fade-animation { animation: fade-miss 0.3s forwards; }
-
 /* 按鈕與統計面板 */
 .controls { display: flex; gap: 15px; }
 button {
@@ -268,28 +197,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
     position: absolute; left: 25%; /* 這裡設定及格線在 25% 的位置 */
     top: 0; bottom: 0; width: 3px; background: rgba(231, 76, 60, 0.8); z-index: 2;
 }
-/* --- 🔥 更新：泡泡快超時的透明度閃爍 (呼吸燈效果) --- */
-@keyframes fade-blink {
-    0% { opacity: 1; }
-    50% { opacity: 0.2; } /* 變透明 */
-    100% { opacity: 1; }
-}
-
-.warning-blink {
-    animation: fade-blink 1s infinite ease-in-out;
-    /* 乾淨俐落，沒有多餘的紅色外框或陰影 */
-}
-/* --- 🔥 更新：泡泡快超時的【紅色＋透明】呼吸燈 --- */
-@keyframes fade-blink-red {
-    0% { opacity: 1; background: linear-gradient(135deg, #3498db, #2980b9); }
-    50% { opacity: 0.4; background: #e74c3c; } /* 變透明且底色轉紅 */
-    100% { opacity: 1; background: linear-gradient(135deg, #3498db, #2980b9); }
-}
-
-.warning-blink {
-    animation: fade-blink-red 1.2s infinite ease-in-out !important;
-}
-
 /* --- 🔥 新增：難度按鈕樣式 --- */
 #start-controls {
     display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;
@@ -314,14 +221,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
 #btn-hard { background-color: #e74c3c; }
 #btn-hard:hover:not(:disabled) { background-color: #c0392b; }
 #btn-hard:disabled { background-color: #ffaaa5; }
-@keyframes fade-blink-red {
-    0% { opacity: 1; background: linear-gradient(135deg, #3498db, #2980b9); }
-    50% { opacity: 0.4; background: #e74c3c; } 
-    100% { opacity: 1; background: linear-gradient(135deg, #3498db, #2980b9); }
-}
-.warning-blink {
-    animation: fade-blink-red 1.2s infinite ease-in-out !important;
-}
 /* 
 #start-controls, #tutorial-controls {
     display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;
@@ -383,42 +282,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
 .mic-btn.off:hover {
     background-color: #7f8c8d;
 }
-/* 🔥 新增：泡泡被鎖定時的禁止圖示 */
-.bubble.locked::after {
-    content: "🚫";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    font-size: 55px;
-    z-index: 10;
-    opacity: 0.9;
-    pointer-events: none; 
-    
-    animation: none; 
-}
-
-.stone-container.locked::after {
-    content: "🚫";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    font-size: 55px;
-    z-index: 100;
-    opacity: 0.9;
-    pointer-events: none; 
-    
-    animation: none; 
-}
-
-/* 確保禁止圖示能完美疊加在正中央 */
-.bubble {
-    position: relative; 
-}
-.stone-container {
-    position: relative;
-}
 /* 🔥 新增：模式選擇區樣式 */
 .mode-selector {
     display: flex;
@@ -458,35 +321,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
 }
 
 /* =========================================
-   🍦 冰淇淋遊戲專屬樣式 (範圍限制版)
-   ========================================= */
-#ice-cream-target {
-    position: absolute;
-    font-size: 80px; /* 稍微縮小一點，避免超出人物框 */
-    z-index: 50;
-    display: none;
-    filter: drop-shadow(0 0 20px rgba(255, 215, 0, 0.8));
-    transition: transform 0.2s;
-    pointer-events: none; /* 避免滑鼠點擊干擾 */
-}
-
-/* 將 % 數往內縮，讓冰淇淋緊緊貼在虛擬人物的上下左右 */
-.ic-up { top: 5%; left: 50%; transform: translateX(-50%); }
-.ic-down { bottom: 5%; left: 50%; transform: translateX(-50%); }
-.ic-left { top: 50%; left: 5%; transform: translateY(-50%); }
-.ic-right { top: 50%; right: 5%; transform: translateY(-50%); }
-
-.ic-pop {
-    animation: iceCreamPop 0.4s ease-out forwards;
-}
-
-@keyframes iceCreamPop {
-    0% { transform: scale(1); opacity: 1; }
-    50% { transform: scale(1.5); opacity: 0.8; filter: drop-shadow(0 0 40px rgba(255, 255, 255, 1)); }
-    100% { transform: scale(0); opacity: 0; }
-}
-
-/* =========================================
    📱 響應式設計 (RWD)
    斷點規劃:
      - ≥1200px        : 桌面電腦(預設)左右分屏 50/50
@@ -517,24 +351,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
         font-size: 17px;
         padding: 12px 8px;
     }
-    .conveyor-wrapper {
-        max-width: 480px;
-        height: 130px;
-    }
-    .target-zone {
-        width: 100px; height: 100px;
-        top: 15px; left: 15px;
-    }
-    .bubble {
-        width: 70px; height: 70px; font-size: 32px;
-    }
-    .bubble.current {
-        width: 92px; height: 92px; font-size: 48px;
-    }
-    #stone-container {
-        width: 160px; height: 160px;
-    }
-    #stone-text { font-size: 60px; }
     .tutorial-btn {
         font-size: 22px;
         padding: 16px 30px;
@@ -612,39 +428,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
         font-size: 22px;
         min-height: 60px;
     }
-    .conveyor-wrapper {
-        width: 95%;
-        max-width: 560px;
-        height: 130px;
-        margin-bottom: 24px;
-        transform: none; /* 移除舊版 scale,改用真實尺寸縮放,避免被裁切 */
-    }
-    .target-zone {
-        width: 100px; height: 100px;
-        top: 15px; left: 15px;
-    }
-    .bubble {
-        width: 70px; height: 70px; font-size: 32px;
-    }
-    .bubble.current {
-        width: 92px; height: 92px; font-size: 48px;
-    }
-    .bubble.locked::after,
-    .stone-container.locked::after {
-        font-size: 46px;
-    }
-    #stone-container {
-        width: 150px; height: 150px;
-        border-radius: 18px;
-    }
-    #stone-text { font-size: 54px; }
-    #stone-hp {
-        font-size: 18px;
-        padding: 4px 12px;
-    }
-    #voice-game-ui {
-        height: 180px !important;
-    }
     .tutorial-btn {
         font-size: 20px;
         padding: 16px 24px;
@@ -661,12 +444,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
         gap: 10px;
         margin-bottom: 14px;
     }
-    /* 冰淇淋目標位置稍微往內縮,避免緊貼分隔線 */
-    .ic-up { top: 4%; }
-    .ic-down { bottom: 4%; }
-    .ic-left { left: 4%; }
-    .ic-right { right: 4%; }
-    #ice-cream-target { font-size: 64px; }
 }
 
 /* -------- 3) 手機 : <600px -------- */
@@ -714,48 +491,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
             -1.5px  1.5px 0 #e74c3c, 1.5px  1.5px 0 #e74c3c,
              0px 3px 6px rgba(0,0,0,0.25);
     }
-    .conveyor-wrapper {
-        width: 100%;
-        max-width: 100%;
-        height: 110px;
-        border-radius: 55px;
-        margin-bottom: 18px;
-    }
-    .target-zone {
-        width: 80px; height: 80px;
-        top: 12px; left: 12px;
-        border-width: 3px;
-    }
-    #conveyor-belt {
-        gap: 12px;
-        padding-left: 18px;
-    }
-    .bubble {
-        width: 56px; height: 56px; font-size: 26px;
-        border-width: 2px;
-    }
-    .bubble.current {
-        width: 76px; height: 76px; font-size: 38px;
-        border-width: 2px;
-    }
-    .bubble.locked::after,
-    .stone-container.locked::after {
-        font-size: 36px;
-    }
-    #stone-container {
-        width: 120px; height: 120px;
-        border-radius: 16px;
-        border-width: 3px;
-    }
-    #stone-text { font-size: 42px; }
-    #stone-hp {
-        font-size: 14px;
-        padding: 3px 10px;
-        margin-top: 6px;
-    }
-    #voice-game-ui {
-        height: 150px !important;
-    }
     .tutorial-btn {
         font-size: 16px;
         padding: 14px 16px;
@@ -778,12 +513,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
     .audio-meter {
         width: 95%;
     }
-    /* 冰淇淋符號縮小,避免遮住 3D 角色 */
-    #ice-cream-target { font-size: 52px; }
-    .ic-up { top: 2%; }
-    .ic-down { bottom: 2%; }
-    .ic-left { left: 2%; }
-    .ic-right { right: 2%; }
     #stats-panel {
         width: 95%;
         font-size: 15px;
@@ -827,15 +556,6 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
         font-size: 16px;
         min-height: 40px;
     }
-    .conveyor-wrapper {
-        height: 90px;
-        margin-bottom: 10px;
-    }
-    .target-zone { width: 70px; height: 70px; top: 10px; left: 10px; }
-    .bubble { width: 50px; height: 50px; font-size: 22px; }
-    .bubble.current { width: 66px; height: 66px; font-size: 32px; }
-    #stone-container { width: 100px; height: 100px; }
-    #stone-text { font-size: 36px; }
 }
 
 /* =========================================
@@ -853,67 +573,4 @@ button:disabled { background-color: #95a5a6; cursor: not-allowed; }
 /* 確保結束遊戲按鈕本身不會被拉長 */
 #endBtn {
     margin: 0; /* 清除可能殘留的 margin */
-}
-/* =========================================
-   🪨 發聲模式：巨石破壞專屬樣式 
-   ========================================= */
-#stone-container {
-    width: 180px; 
-    height: 180px;
-    background: linear-gradient(135deg, #7f8c8d, #2c3e50);
-    border-radius: 20px; /* 圓角石頭感 */
-    display: flex; 
-    flex-direction: column; 
-    align-items: center; 
-    justify-content: center;
-    color: white; 
-    box-shadow: 0 15px 25px rgba(0,0,0,0.6), inset 0 0 20px rgba(255,255,255,0.2);
-    position: relative;
-    border: 4px solid #bdc3c7;
-    transition: filter 0.2s;
-}
-
-#stone-text {
-    font-size: 70px;
-    font-weight: bold;
-    text-shadow: 3px 3px 0px #000, -1px -1px 0px #444;
-    font-family: 'Arial Black', sans-serif;
-}
-
-#stone-hp {
-    font-size: 22px;
-    margin-top: 10px;
-    background: rgba(0,0,0,0.6);
-    padding: 5px 15px;
-    border-radius: 15px;
-    font-weight: bold;
-}
-
-/* 巨石遭到聲波攻擊時的震動 */
-.stone-hit {
-    animation: stoneShake 0.3s cubic-bezier(.36,.07,.19,.97) both;
-    filter: brightness(1.5);
-    border-color: #e74c3c;
-}
-
-@keyframes stoneShake {
-    10%, 90% { transform: translate3d(-4px, 2px, 0) rotate(-2deg); }
-    20%, 80% { transform: translate3d(4px, -2px, 0) rotate(2deg); }
-    30%, 50%, 70% { transform: translate3d(-8px, 4px, 0) rotate(-4deg); }
-    40%, 60% { transform: translate3d(8px, -4px, 0) rotate(4deg); }
-}
-
-/* 發聲模式:剩 3 秒時石頭外框與倒數變紅,提醒快沒時間(不用 animation,才不會蓋掉被敲擊的震動) */
-#stone-container.stone-warning { border-color: #e74c3c; }
-#stone-container.stone-warning #stone-hp { background: #e74c3c; }
-
-/* 巨石徹底爆炸的特效 */
-.stone-explode {
-    animation: stoneExplode 0.6s forwards ease-out;
-}
-
-@keyframes stoneExplode {
-    0% { transform: scale(1); opacity: 1; filter: brightness(1.5) drop-shadow(0 0 20px red); }
-    40% { transform: scale(1.3); opacity: 0.8; filter: brightness(2); }
-    100% { transform: scale(2) translateY(-50px); opacity: 0; filter: brightness(3); }
 }
