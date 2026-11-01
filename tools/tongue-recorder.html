@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>舌頭樣本錄製</title>
+<!-- 開發用工具:錄下真人的舌頭樣本(嘴巴小圖 + 舌頭模型輸出 + 臉部點位),用來改進舌頭方向判斷。
+     不出題、不計分、不上傳;下載的 JSON 只存在自己的電腦。 -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js"></script>
+<style>
+  :root { --bg: #1e2430; --panel: #2a3240; --text: #eef2f7; --dim: #9aa6b8; --accent: #f39c12; --ok: #2ecc71; --rec: #e74c3c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Microsoft JhengHei', sans-serif; }
+  main { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .col.left { width: min(640px, 100%); }
+  .view { position: relative; width: 100%; }
+  #cam { width: 100%; border-radius: 12px; background: #000; display: block; }
+  /* 倒數放在右上角,不擋住嘴巴 */
+  #countdown { position: absolute; top: 8px; right: 14px; font-size: 72px; font-weight: 900; color: #fff;
+    text-shadow: 0 3px 14px rgba(0,0,0,.7); pointer-events: none; }
+  .panel { background: var(--panel); border-radius: 12px; padding: 14px 16px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  p { margin: 4px 0; color: var(--dim); font-size: 14px; line-height: 1.5; }
+  .dirs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .dirs button { padding: 14px 6px; font-size: 18px; border-radius: 10px; border: 2px solid transparent;
+    background: #3a4456; color: var(--text); cursor: pointer; }
+  .dirs button.on { border-color: var(--accent); background: #4b3a1c; }
+  .dirs small { display: block; font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions button { flex: 1; padding: 14px; font-size: 17px; border: none; border-radius: 10px; cursor: pointer; color: #fff; }
+  #btn-rec { background: var(--rec); }
+  #btn-rec:disabled { background: #6b3b38; cursor: not-allowed; }
+  #btn-dl { background: #2980b9; }
+  #btn-undo { background: #596275; flex: 0 0 auto; }
+  #crop { width: 256px; height: 256px; border-radius: 10px; background: #000; image-rendering: pixelated; }
+  #live { font: 14px/1.6 Consolas, monospace; white-space: pre; margin: 0; }
+  #counts { font-size: 15px; }
+  .status { font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <div class="col left">
+    <div class="view">
+      <canvas id="cam" width="640" height="360"></canvas>
+      <div id="countdown"></div>
+    </div>
+    <div class="panel">
+      <p>畫面像鏡子一樣左右相反。綠點 = 外唇、黃點 = 內唇;被舌頭蓋住的點會變紅。</p>
+    </div>
+  </div>
+
+  <div class="col" style="flex: 1; min-width: 320px; max-width: 560px;">
+    <div class="panel">
+      <h1>👅 舌頭樣本錄製</h1>
+      <p>1. 選要錄的方向(左右是<b>你自己的</b>左右)。</p>
+      <p>2. 按「錄製」或空白鍵,倒數 3 秒內把舌頭伸到位,接著會連續錄 5 張。</p>
+      <p>3. 每個方向錄 3~4 次(每次稍微改變伸出長度或頭的角度),「下」多錄幾次。</p>
+      <p>4. 錄完按「下載」,把檔案路徑告訴 Claude。</p>
+      <p class="status" id="status">載入中…</p>
+    </div>
+
+    <div class="panel col">
+      <div class="dirs" id="dirs"></div>
+      <div class="actions">
+        <button id="btn-rec" disabled>⏺ 錄製(空白鍵)</button>
+        <button id="btn-undo" title="刪除最後一次錄製的 5 張">↩ 刪除上一次</button>
+      </div>
+      <div id="counts"></div>
+      <div class="actions"><button id="btn-dl">💾 下載樣本 (0)</button></div>
+    </div>
+
+    <div class="panel" style="display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap;">
+      <canvas id="crop" width="256" height="256" title="嘴巴小圖(紅色 = 舌頭模型認為是舌頭的地方)"></canvas>
+      <pre id="live">—</pre>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+import { TongueDirectionDetector } from '../js/tongue_direction.js';
+
+const DIRS = [['上', '⬆️'], ['下', '⬇️'], ['左', '⬅️'], ['右', '➡️'], ['無', '😐']];
+const OUTER = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 146, 91, 181, 84, 17, 314, 405, 321, 375];
+const INNER = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 95, 88, 178, 87, 14, 317, 402, 318, 324];
+const SHOTS = 5, SHOT_GAP = 300, COUNTDOWN = 3;
+
+const $ = id => document.getElementById(id);
+const status = t => { $('status').textContent = t; };
+let target = '下';
+const samples = [];
+const batches = []; // 每次錄製的張數,給「刪除上一次」用
+
+// 方向按鈕
+for (const [d, icon] of DIRS) {
+  const b = document.createElement('button');
+  b.innerHTML = `${icon} ${d === '無' ? '不伸' : d}<small>${d === '無' ? '嘴巴張開、舌頭不伸' : '0 張'}</small>`;
+  b.dataset.dir = d;
+  b.addEventListener('click', () => { target = d; renderDirs(); });
+  $('dirs').appendChild(b);
+}
+function renderDirs() {
+  for (const b of $('dirs').children) {
+    const n = samples.filter(s => s.target === b.dataset.dir).length;
+    b.classList.toggle('on', b.dataset.dir === target);
+    b.querySelector('small').textContent = `${n} 張`;
+  }
+  $('btn-dl').textContent = `💾 下載樣本 (${samples.length})`;
+  $('counts').textContent = samples.length ? `已錄 ${samples.length} 張` : '';
+}
+renderDirs();
+
+// ── 鏡頭、臉部偵測、舌頭模型 ──
+const video = document.createElement('video');
+video.muted = true; video.playsInline = true;
+let landmarker, detector;
+try {
+  status('開啟鏡頭…');
+  video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+  await video.play();
+  status('載入臉部辨識…');
+  const { FaceLandmarker, FilesetResolver } = await import('https://cdn.skypack.dev/@mediapipe/tasks-vision@0.10.3');
+  const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm');
+  landmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numFaces: 1,
+  });
+  status('載入舌頭模型…');
+  // inferEvery: 1 → 每張畫面都重新推論,嘴巴小圖和模型輸出一定是同一張
+  detector = await new TongueDirectionDetector({ tf: window.tf, modelPath: '../web_model/model.json', inferEvery: 1 }).load();
+  status('準備好了,選方向後按錄製');
+  $('btn-rec').disabled = false;
+} catch (err) {
+  status('❌ 啟動失敗:' + (err.name === 'NotAllowedError' ? '請允許鏡頭權限後重新整理' : err.message));
+  throw err;
+}
+
+// ── 每張畫面:偵測 + 畫預覽 ──
+const cam = $('cam'), cctx = cam.getContext('2d');
+const crop = $('crop'), kctx = crop.getContext('2d');
+let latest = null, lastVideoTime = -1;
+function loop() {
+  requestAnimationFrame(loop);
+  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const w = video.videoWidth, h = video.videoHeight;
+  if (cam.width !== w) { cam.width = w; cam.height = h; }
+
+  const lm = landmarker.detectForVideo(video, performance.now()).faceLandmarks?.[0];
+  const r = lm ? detector.detect(video, lm) : null;
+  latest = lm && r ? { lm, r } : null;
+
+  // 鏡像預覽 + 嘴唇點
+  cctx.save(); cctx.translate(w, 0); cctx.scale(-1, 1);
+  cctx.drawImage(video, 0, 0, w, h);
+  const seg = r?.mouthOpen ? detector._cachedSeg : null;
+  const covered = (p) => {
+    if (!seg) return false;
+    const u = Math.round((p.x * w - seg.x0) / seg.s * 128), v = Math.round((p.y * h - seg.y0) / seg.s * 128);
+    return u >= 0 && u < 128 && v >= 0 && v < 128 && seg.data[v * 128 + u] > detector.probThresh;
+  };
+  if (lm) for (const [list, color] of [[OUTER, '#2ecc71'], [INNER, '#f1c40f']]) for (const i of list) {
+    cctx.fillStyle = covered(lm[i]) ? '#ff3b30' : color;
+    cctx.beginPath(); cctx.arc(lm[i].x * w, lm[i].y * h, Math.max(2, w / 320), 0, Math.PI * 2); cctx.fill();
+  }
+  cctx.restore();
+
+  // 嘴巴小圖 + 舌頭遮罩(鏡像顯示)
+  kctx.save(); kctx.translate(256, 0); kctx.scale(-1, 1);
+  if (seg) {
+    kctx.drawImage(detector.roiCanvas, 0, 0, 256, 256);
+    const img = kctx.getImageData(0, 0, 256, 256); // 已鏡像:像素 x 對應 ROI 的 127 - x/2
+    for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+      const p = seg.data[(y >> 1) * 128 + (127 - (x >> 1))];
+      if (p > detector.probThresh) { const k = (y * 256 + x) * 4; img.data[k] = 255; img.data[k + 1] *= 0.45; img.data[k + 2] *= 0.45; }
+    }
+    kctx.restore();
+    kctx.putImageData(img, 0, 0);
+  } else {
+    kctx.restore();
+    kctx.fillStyle = '#000'; kctx.fillRect(0, 0, 256, 256);
+    kctx.fillStyle = '#9aa6b8'; kctx.font = '16px sans-serif'; kctx.textAlign = 'center';
+    kctx.fillText(lm ? '嘴巴沒張開' : '找不到臉', 128, 132);
+  }
+
+  $('live').textContent = !lm ? '找不到臉' : [
+    `目前判斷:${r.direction ?? '—'}`,
+    `判斷方式:${r.method ?? (r.mouthOpen ? '—' : '嘴巴沒張開')}`,
+    `票數:${r.votes ? Object.entries(r.votes).map(([k, v]) => k + v).join(' ') : '—'}`,
+    `嘴巴張開:${r.openRatio.toFixed(2)}`,
+    `鏡頭:${w}×${h}`,
+  ].join('\n');
+}
+requestAnimationFrame(loop);
+
+// ── 錄製:倒數 3 秒,再每 0.3 秒錄 1 張、共 5 張 ──
+const beep = (f, dur) => { try { const a = new AudioContext(), o = a.createOscillator(), g = a.createGain(); o.frequency.value = f; g.gain.value = 0.15; o.connect(g).connect(a.destination); o.start(); o.stop(a.currentTime + dur); o.onended = () => a.close(); } catch {} };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let recording = false;
+async function record() {
+  if (recording || !detector) return;
+  recording = true; $('btn-rec').disabled = true;
+  const dir = target;
+  for (let i = COUNTDOWN; i > 0; i--) { $('countdown').textContent = i; beep(660, 0.08); await sleep(1000); }
+  $('countdown').textContent = '⏺';
+  let got = 0;
+  for (let i = 0; i < SHOTS; i++) {
+    if (latest) { samples.push(makeSample(dir, latest)); got++; }
+    await sleep(SHOT_GAP);
+  }
+  batches.push(got);
+  beep(990, 0.15);
+  $('countdown').textContent = '';
+  status(got ? `✅ 「${dir}」錄了 ${got} 張` : '⚠️ 找不到臉,這次沒有錄到');
+  renderDirs();
+  recording = false; $('btn-rec').disabled = false;
+}
+
+function makeSample(dir, { lm, r }) {
+  const seg = detector._cachedSeg;
+  const s = {
+    target: dir, detected: r.direction, method: r.method ?? null, votes: r.votes ?? null, openRatio: r.openRatio,
+    video: { w: video.videoWidth, h: video.videoHeight },
+    landmarks: lm.map(p => [+p.x.toFixed(5), +p.y.toFixed(5)]),
+  };
+  if (r.mouthOpen && seg) {
+    s.roi = { x0: seg.x0, y0: seg.y0, s: seg.s };
+    s.roiPng = detector.roiCanvas.toDataURL('image/png');
+    let bin = '';
+    for (let i = 0; i < seg.data.length; i++) bin += String.fromCharCode(Math.round(seg.data[i] * 255));
+    s.seg = btoa(bin); // 128×128,每格 0~255 = 舌頭機率
+  }
+  return s;
+}
+
+$('btn-rec').addEventListener('click', record);
+document.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); record(); } });
+$('btn-undo').addEventListener('click', () => {
+  const n = batches.pop();
+  if (!n) return;
+  samples.splice(samples.length - n, n);
+  status(`已刪除上一次的 ${n} 張`);
+  renderDirs();
+});
+$('btn-dl').addEventListener('click', () => {
+  if (!samples.length) return;
+  const blob = new Blob([JSON.stringify({ version: 1, tool: 'tongue-recorder', userAgent: navigator.userAgent, samples })], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tongue-samples-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+window.addEventListener('beforeunload', e => { if (samples.length) e.preventDefault(); }); // 還沒下載就關掉時提醒
+</script>
+</body>
+</html>
