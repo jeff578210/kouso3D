@@ -26,6 +26,12 @@ const MOUTH_CORNER_R = 61, MOUTH_CORNER_L = 291;
 // 質心退路的最低要求:舌頭面積至少佔 ROI 的 0.5%(過濾零星雜點)、偏離中心至少 0.25 個半嘴寬,太小或太靠中間就不猜方向
 const MIN_TONGUE_PIXELS = Math.round(ROI_SIZE * ROI_SIZE * 0.005);
 const MIN_CENTROID_OFFSET = 0.25;
+// 內唇開口(判斷「往下」用)
+const INNER_LIP = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 95, 88, 178, 87, 14, 317, 402, 318, 324];
+// 「往下」的條件(由真人樣本得出:往下時開口高寬比 0.68~0.98、舌頭佔開口 33%~76%;
+// 上/左/右的高寬比都 ≤ 0.59,而且往上時舌頭中心一定在開口上半部)
+const DOWN_MIN_TALL = 0.63;
+const DOWN_MIN_FILL = 0.25;
 
 export class TongueDirectionDetector {
   constructor(opts) {
@@ -140,7 +146,33 @@ export class TongueDirectionDetector {
     const faceXY = (px, py) => ({ nx: (dot({ x: px, y: py }, ex) - cX) / halfW, ny: (dot({ x: px, y: py }, ey) - cY) / halfH });
     const toDir = (nx, ny) => Math.abs(nx) > Math.abs(ny) ? (nx > 0 ? '左' : '右') : (ny > 0 ? '下' : '上');
 
-    // (6) Landmark 投票:被舌頭蓋住的嘴唇點在中心的哪一邊
+    // (6) 往下:舌頭伸出下唇時,臉部辨識會把伸出來的舌頭當成下唇,內唇開口被撐得很高;
+    //     舌頭模型則只標出嘴巴裡那一段(開口中間一大塊)。看不到伸出去的部分,所以不能用投票判斷,
+    //     改看「開口很高 + 舌頭佔開口一大塊 + 舌頭中心在開口下半部」
+    let ix0 = Infinity, ix1 = -Infinity, iy0 = Infinity, iy1 = -Infinity;
+    for (const i of INNER_LIP) {
+      const p = P(i), x = dot(p, ex), y = dot(p, ey);
+      if (x < ix0) ix0 = x; if (x > ix1) ix1 = x; if (y < iy0) iy0 = y; if (y > iy1) iy1 = y;
+    }
+    const innerHW = Math.max(1, (ix1 - ix0) / 2), innerHH = Math.max(1, (iy1 - iy0) / 2);
+    const tall = innerHH / innerHW;
+    this.lastShape = { tall, fill: null }; // 給除錯面板看
+    if (tall >= DOWN_MIN_TALL) {
+      const icY = (iy0 + iy1) / 2;
+      let n = 0, sumY = 0;
+      for (let v = 0; v < ROI_SIZE; v++) for (let u = 0; u < ROI_SIZE; u++) {
+        if (seg[v * ROI_SIZE + u] <= this.probThresh) continue;
+        n++;
+        sumY += dot({ x: sx0 + (u + 0.5) / ROI_SIZE * ss, y: sy0 + (v + 0.5) / ROI_SIZE * ss }, ey);
+      }
+      const fill = n * (ss / ROI_SIZE) ** 2 / (Math.PI * innerHW * innerHH);
+      this.lastShape.fill = fill;
+      if (n && fill >= DOWN_MIN_FILL && sumY / n > icY) {
+        return { direction: '下', mouthOpen: true, openRatio, method: '開口撐高' };
+      }
+    }
+
+    // (7) Landmark 投票:被舌頭蓋住的嘴唇點在中心的哪一邊
     const votes = { '上': 0, '下': 0, '左': 0, '右': 0 };
     for (let i = 0; i < LIP_INDICES.length; i++) {
       const p = P(LIP_INDICES[i]);
@@ -153,7 +185,7 @@ export class TongueDirectionDetector {
       return { direction: arr[0][0], mouthOpen: true, openRatio, method: '投票', votes };
     }
 
-    // (7) 質心退路:舌頭整塊的中心在哪一邊(面積太小或太靠中間就不猜)
+    // (8) 質心退路:舌頭整塊的中心在哪一邊(面積太小或太靠中間就不猜)
     let tsx = 0, tsy = 0, tn = 0;
     for (let v = 0; v < ROI_SIZE; v++) {
       const row = v * ROI_SIZE;

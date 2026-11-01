@@ -163,6 +163,8 @@ function handleFaceFrame(results, now) {
   debugShow('舌頭', {
     目標: targetPose,
     嘴巴張開: `${r.openRatio.toFixed(2)} / 門檻 ${detector.openThresh}`,
+    // 往下的判斷依據:開口高寬比 ≥ 0.63 且舌頭佔開口 ≥ 25%
+    開口高寬比: detector.lastShape && r.mouthOpen ? `${detector.lastShape.tall.toFixed(2)}${detector.lastShape.fill != null ? `,舌頭佔 ${Math.round(detector.lastShape.fill * 100)}%` : ''}` : '—',
     這張畫面: r.direction ? `${r.direction}(玩家自己的${r.direction}邊)` : '—',
     判斷方式: r.method || (r.mouthOpen ? '—' : '嘴巴沒張開'),
     票數: r.votes ? Object.entries(r.votes).map(([k, v]) => `${k}${v}`).join(' ') : '—',
