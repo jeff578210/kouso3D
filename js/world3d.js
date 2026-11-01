@@ -979,7 +979,8 @@ export async function createWorld(container, { quality = 'high', onVrmLoaded } =
     lockSprite.visible = locked && !!cur;
     if (lockSprite.visible) {
       const r = cur.scale.x;
-      lockSprite.position.copy(cur.position).add(new THREE.Vector3(0, 0, r * 1.2));
+      // 朝鏡頭方向往前挪(不是沿世界 z 軸),畫面上才會剛好疊在題目正中央
+      lockSprite.position.copy(camera.position).sub(cur.position).normalize().multiplyScalar(r * 1.2).add(cur.position);
       lockSprite.scale.setScalar(r * (isStoneMode() ? 1.3 : 1.8));
     }
 
