@@ -8,6 +8,8 @@ import { currentVrm, currentTrainingMode, isGameRunning, currentDifficulty,
          DIFFICULTY_CONFIG, poseQueue, isTutorialLocked, triggerResult, world } from './app.js';
 import { TongueDirectionDetector } from './tongue_direction.js';
 import { onFaceFrame } from './face_tracker.js';
+import { smoothToward, createMatchFilter } from './judge_utils.js';
+import { debugShow } from './debug_panel.js';
 // 使用 index.html 上載入的全域 tf(已升級為 TF 4.x);speech-commands 也共用這個版本
 const tf = window.tf;
 
@@ -20,8 +22,8 @@ let lastTime = performance.now();
 // 兩張畫面的最大間隔(ms):切換分頁回來時避免計時器一次跳好幾秒
 const MAX_DT = 250;
 
-// 沿用原本平滑邏輯(讓下游判定零修改)
-const SMOOTHING_FACTOR = 0.1;
+// 方向信心值的平滑:300ms 約等於以前「每秒 30 張、每張 10%」的反應速度,但不再受鏡頭張數影響
+const SMOOTH_TAU = 300;
 let smoothedProbs = {
   'Neutral': 1.0,
   'tongueUp': 0.0,
@@ -42,6 +44,8 @@ const DIR_TO_INTERNAL = {
 let holdTime = 0;
 let turnTimeLeft = 5000;
 let lastTarget = "";
+let wasMatched = false;                  // 上一刻是否做對(用來放寬門檻)
+const matchFilter = createMatchFilter(250);
 
 export async function initTongueMode() {
   console.log("正在載入 U-Net 舌頭分割模型(取代 Teachable Machine)...");
@@ -84,112 +88,131 @@ function checkTonguePoseMatch(targetPose, detectedAction, confidence, threshold)
   return poseMap[targetPose] === detectedAction;
 }
 
+const INTERNAL_TO_ARROW = { tongueUp: '⬆️', tongueDown: '⬇️', tongueLeft: '⬅️', tongueRight: '➡️' };
+
 // results 來自共用的 MediaPipe FaceLandmarker,不再自己重跑一次偵測
 function handleFaceFrame(results, now) {
   const dt = Math.min(now - lastTime, MAX_DT);
   lastTime = now;
-  if (!isDetecting || currentTrainingMode !== 'tongue') return;
+  if (!isDetecting || currentTrainingMode !== 'tongue' || !detector || !video) return;
 
-  if (detector && video) {
-    if (results.faceLandmarks && results.faceLandmarks.length > 0) {
-      const landmarks = results.faceLandmarks[0];
+  const hasFace = !!(results.faceLandmarks && results.faceLandmarks.length > 0);
+  const r = hasFace ? detector.detect(video, results.faceLandmarks[0]) : null;
+  // r.direction → '上' | '下' | '左' | '右' | null(玩家自己的左右)
+  // r.mouthOpen → boolean(閉嘴時 direction 必為 null,且不會跑推論)
 
-      // ⭐ 核心改變:U-Net 直接告訴我們方向,不需要自己裁切嘴部、不用 TM
-      const r = detector.detect(video, landmarks);
-      // r.direction → '上' | '下' | '左' | '右' | null
-      // r.mouthOpen → boolean(閉嘴時 direction 必為 null,且不會跑推論)
-      // r.openRatio → number(內唇高/寬)
+  if (r) {
+    // 依實際經過時間平滑(以前是每張畫面固定 10%,鏡頭每秒張數不同時反應速度會差一倍)
+    const internalName = (r.direction && DIR_TO_INTERNAL[r.direction]) || 'Neutral';
+    for (const key in smoothedProbs) {
+      smoothedProbs[key] = smoothToward(smoothedProbs[key], key === internalName ? 1 : 0, dt, SMOOTH_TAU);
+    }
+  }
 
-      // 把方向結果灌進原本的 smoothedProbs 結構(讓下游遊戲邏輯零修改)
-      const internalName = (r.direction && DIR_TO_INTERNAL[r.direction]) || 'Neutral';
-      const newProbs = { Neutral: 0, tongueUp: 0, tongueDown: 0, tongueLeft: 0, tongueRight: 0 };
-      newProbs[internalName] = 1.0;
-      for (const key in smoothedProbs) {
-        smoothedProbs[key] = smoothedProbs[key] * (1 - SMOOTHING_FACTOR)
-                           + (newProbs[key] || 0) * SMOOTHING_FACTOR;
-      }
+  let detected = "";
+  let highestConfidentProb = 0;
+  ['tongueUp', 'tongueDown', 'tongueLeft', 'tongueRight'].forEach(poseName => {
+    if (smoothedProbs[poseName] > highestConfidentProb) {
+      highestConfidentProb = smoothedProbs[poseName];
+      detected = poseName;
+    }
+  });
 
-      let detected = "";
-      let highestConfidentProb = 0;
-      const directionalPoses = ['tongueUp', 'tongueDown', 'tongueLeft', 'tongueRight'];
-      directionalPoses.forEach(poseName => {
-        if (smoothedProbs[poseName] > highestConfidentProb) {
-          highestConfidentProb = smoothedProbs[poseName];
-          detected = poseName;
-        }
+  // VRM 表情:人物的舌頭跟著玩家動(像照鏡子)
+  if (currentVrm && r) {
+    try {
+      ['tongueOut', 'tongueUp', 'tongueDown', 'tongueLeft', 'tongueRight'].forEach(exp => {
+        currentVrm.expressionManager.setValue(exp, 0);
       });
-
-      // VRM 表情(完全沿用原版邏輯)
-      if (currentVrm) {
-        try {
-          ['tongueOut', 'tongueUp', 'tongueDown', 'tongueLeft', 'tongueRight'].forEach(exp => {
-            currentVrm.expressionManager.setValue(exp, 0);
-          });
-          if (highestConfidentProb > 0.4 && detected !== "") {
-            currentVrm.expressionManager.setValue('tongueOut', 0.8);
-            currentVrm.expressionManager.setValue(detected, 0.2);
-          }
-        } catch (e) {}
+      if (highestConfidentProb > 0.4 && detected !== "") {
+        currentVrm.expressionManager.setValue('tongueOut', 0.8);
+        currentVrm.expressionManager.setValue(detected, 0.2);
       }
+    } catch (e) {}
+  }
 
-      // 遊戲過關判定(完全沿用原版邏輯)
-      if (isGameRunning && poseQueue.length > 0) {
-        const targetPose = poseQueue[0];
-        const conf = DIFFICULTY_CONFIG[currentDifficulty];
+  // 遊戲過關判定
+  if (!isGameRunning || poseQueue.length === 0) return;
+  const targetPose = poseQueue[0];
+  const conf = DIFFICULTY_CONFIG[currentDifficulty];
+  const hintMessage = document.getElementById("hint-message");
+  const setHint = (text, color) => { if (hintMessage) { hintMessage.innerText = text; hintMessage.style.color = color; } };
 
-        const isMatched = checkTonguePoseMatch(targetPose, detected, highestConfidentProb, GAME_TRIGGER_THRESHOLD);
-        const hintMessage = document.getElementById("hint-message");
+  if (targetPose !== lastTarget) {
+    lastTarget = targetPose;
+    holdTime = 0;
+    turnTimeLeft = 10000;
+    wasMatched = false;
+    matchFilter.reset();
+  }
 
-        if (targetPose !== lastTarget) {
-          lastTarget = targetPose;
-          holdTime = 0;
-          turnTimeLeft = 10000;
-        }
+  // 找不到臉:暫停計時,不算玩家做錯
+  if (!hasFace) {
+    setHint("🙂 找不到臉,請把臉對準鏡頭", "#ffffff");
+    debugShow('舌頭', { 目標: targetPose, 臉: '找不到' });
+    return;
+  }
 
-        if (isTutorialLocked) {
-          if (hintMessage) {
-            hintMessage.innerText = "🔊 請先聽完語音指示喔!";
-            hintMessage.style.color = "#8e44ad";
-          }
-          holdTime = 0;
-          world.setProgress(0);
-        } else {
-          if (isMatched) {
-            if (hintMessage) {
-              hintMessage.innerText = "👍 舌頭方向正確!請保持住!";
-              hintMessage.style.color = "#f1c40f";
-            }
-            world.setWarning(false);
+  // 上一刻已經做對時門檻放寬一點,信心值在門檻附近抖動時不會一下對、一下錯
+  const threshold = wasMatched ? GAME_TRIGGER_THRESHOLD * 0.75 : GAME_TRIGGER_THRESHOLD;
+  const isMatched = checkTonguePoseMatch(targetPose, detected, highestConfidentProb, threshold);
+  // 短暫閃掉(0.25 秒內)不算中斷:不累積、不扣時間,也不歸零
+  const state = isTutorialLocked ? 'miss' : matchFilter.update(isMatched, now);
+  wasMatched = state !== 'miss';
 
-            holdTime += dt;
-            world.setProgress(holdTime / conf.holdDuration); // 目標圈的綠色進度弧,泡泡也漸漸變綠
+  debugShow('舌頭', {
+    目標: targetPose,
+    嘴巴張開: `${r.openRatio.toFixed(2)} / 門檻 ${detector.openThresh}`,
+    // 往下的判斷依據:開口高寬比 ≥ 0.63 且舌頭佔開口 ≥ 25%
+    開口高寬比: detector.lastShape && r.mouthOpen ? `${detector.lastShape.tall.toFixed(2)}${detector.lastShape.fill != null ? `,舌頭佔 ${Math.round(detector.lastShape.fill * 100)}%` : ''}` : '—',
+    這張畫面: r.direction ? `${r.direction}(玩家自己的${r.direction}邊)` : '—',
+    判斷方式: r.method || (r.mouthOpen ? '—' : '嘴巴沒張開'),
+    票數: r.votes ? Object.entries(r.votes).map(([k, v]) => `${k}${v}`).join(' ') : '—',
+    舌頭面積: r.tongueArea ?? '—',
+    平滑後: detected ? `${INTERNAL_TO_ARROW[detected]} ${Math.round(highestConfidentProb * 100)}%(門檻 ${Math.round(threshold * 100)}%)` : '—',
+    判定: { match: '✅ 做對', grace: '⏸ 短暫閃掉', miss: '❌ 沒做對' }[state],
+    維持: `${Math.round(holdTime)} / ${conf.holdDuration} ms`,
+  });
 
-            if (holdTime >= conf.holdDuration) {
-              triggerResult(true);
-              lastTarget = "";
-            }
-          } else {
-            if (hintMessage) {
-              hintMessage.innerText = highestConfidentProb > (GAME_TRIGGER_THRESHOLD - 0.2)
-                ? `🤔 方向不太對喔!`
-                : "👅 預備!請對著鏡頭伸出舌頭!";
-              hintMessage.style.color = "#ffffff";
-            }
-            if (!conf.accumulateProgress) {
-              holdTime = 0;
-              world.setProgress(0);
-            }
-            if (!conf.isTutorial) {
-              turnTimeLeft -= dt;
-              if (turnTimeLeft <= 2000) world.setWarning(true); // 剩 2 秒:泡泡與目標圈閃紅
-              if (turnTimeLeft <= 0) {
-                triggerResult(false);
-                lastTarget = "";
-              }
-            }
-          }
-        }
-      }
+  if (isTutorialLocked) {
+    setHint("🔊 請先聽完語音指示喔!", "#8e44ad");
+    holdTime = 0;
+    world.setProgress(0);
+    return;
+  }
+
+  if (state === 'match') {
+    setHint("👍 舌頭方向正確!請保持住!", "#f1c40f");
+    world.setWarning(false);
+
+    holdTime += dt;
+    world.setProgress(holdTime / conf.holdDuration); // 目標圈的綠色進度弧,泡泡也漸漸變綠
+
+    if (holdTime >= conf.holdDuration) {
+      triggerResult(true);
+      lastTarget = "";
+    }
+    return;
+  }
+  if (state === 'grace') return;
+
+  if (!r.mouthOpen) {
+    setHint("👅 預備!請張開嘴巴,伸出舌頭!", "#ffffff");
+  } else if (detected && highestConfidentProb > GAME_TRIGGER_THRESHOLD) {
+    setHint(`🤔 方向不太對喔!(偵測到: ${INTERNAL_TO_ARROW[detected]})`, "#ffffff"); // 顯示偵測到的方向,判反時一看就知道
+  } else {
+    setHint("👅 舌頭再伸出來一點!", "#ffffff");
+  }
+  if (!conf.accumulateProgress) {
+    holdTime = 0;
+    world.setProgress(0);
+  }
+  if (!conf.isTutorial) {
+    turnTimeLeft -= dt;
+    if (turnTimeLeft <= 2000) world.setWarning(true); // 剩 2 秒:泡泡與目標圈閃紅
+    if (turnTimeLeft <= 0) {
+      triggerResult(false);
+      lastTarget = "";
     }
   }
 }

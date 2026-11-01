@@ -113,10 +113,12 @@ export async function initCamera() {
     //    之後只在需要聽聲音的遊戲,由 audio.js 的 openMic() 重新打開。
     try {
         const constraints = {
+            // 電腦用 1280×720:嘴巴在畫面裡大一倍,舌頭模型看得比較清楚(臉部偵測本身會自己縮小,負擔不變)。
+            // 手機本來就拿得近、嘴巴夠大,維持 640×480 省電
             video: {
                 facingMode: 'user',
-                width:  { ideal: 640 },
-                height: { ideal: 480 }
+                width:  { ideal: IS_MOBILE ? 640 : 1280 },
+                height: { ideal: IS_MOBILE ? 480 : 720 }
             },
             audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
         };
