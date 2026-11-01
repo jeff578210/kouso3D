@@ -19,13 +19,18 @@ const LIP_INDICES = [
   314,317,318,321,324,375,402,405,409,415,
 ];
 const INNER_TOP = 13, INNER_BOTTOM = 14, LIP_LEFT = 78, LIP_RIGHT = 308;
+// 外唇輪廓(上唇 11 點 + 下唇 9 點)。投票只看外唇:舌頭不論往哪伸都會先蓋住內唇,
+// 內唇兩側的點會投成「左/右」,舌頭往下時就常被誤判成右或左
+const OUTER_UPPER = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291];
+const OUTER_LOWER = [146, 91, 181, 84, 17, 314, 405, 321, 375];
+const OUTER_LIP = [...OUTER_UPPER, ...OUTER_LOWER];
 // 判斷方向用的「臉的座標軸」:兩眼外眼角連線 = 左右方向(頭歪一邊時跟著轉);
 // 鼻子底部與下巴 = 臉的中線(舌頭推擠嘴唇時不會跟著移動,比用嘴唇外框算中心穩定)
 const EYE_R_OUTER = 33, EYE_L_OUTER = 263, NOSE_BASE = 2, CHIN = 152;
 const MOUTH_CORNER_R = 61, MOUTH_CORNER_L = 291;
-// 質心退路的最低要求:舌頭面積至少佔 ROI 的 0.5%(過濾零星雜點)、偏離中心至少 0.25 個半嘴寬,太小或太靠中間就不猜方向
+// 退路的最低要求:舌頭面積至少佔 ROI 的 0.5%(過濾零星雜點);伸出嘴唇外至少 0.1 個半嘴寬才算有方向
 const MIN_TONGUE_PIXELS = Math.round(ROI_SIZE * ROI_SIZE * 0.005);
-const MIN_CENTROID_OFFSET = 0.25;
+const MIN_PROTRUSION = 0.1;
 
 export class TongueDirectionDetector {
   constructor(opts) {
@@ -140,10 +145,10 @@ export class TongueDirectionDetector {
     const faceXY = (px, py) => ({ nx: (dot({ x: px, y: py }, ex) - cX) / halfW, ny: (dot({ x: px, y: py }, ey) - cY) / halfH });
     const toDir = (nx, ny) => Math.abs(nx) > Math.abs(ny) ? (nx > 0 ? '左' : '右') : (ny > 0 ? '下' : '上');
 
-    // (6) Landmark 投票:被舌頭蓋住的嘴唇點在中心的哪一邊
+    // (6) Landmark 投票:被舌頭蓋住的「外唇」點在中心的哪一邊
     const votes = { '上': 0, '下': 0, '左': 0, '右': 0 };
-    for (let i = 0; i < LIP_INDICES.length; i++) {
-      const p = P(LIP_INDICES[i]);
+    for (const i of OUTER_LIP) {
+      const p = P(i);
       if (!isTongue(p.x, p.y)) continue;
       const { nx, ny } = faceXY(p.x, p.y);
       votes[toDir(nx, ny)]++;
@@ -153,20 +158,34 @@ export class TongueDirectionDetector {
       return { direction: arr[0][0], mouthOpen: true, openRatio, method: '投票', votes };
     }
 
-    // (7) 質心退路:舌頭整塊的中心在哪一邊(面積太小或太靠中間就不猜)
-    let tsx = 0, tsy = 0, tn = 0;
+    // (7) 退路:舌頭往哪一邊「伸出嘴唇外」最多(不用舌頭的中心:舌頭往下時中心還在嘴巴中間,分不出方向)
+    const xs = [], ys = [];
     for (let v = 0; v < ROI_SIZE; v++) {
       const row = v * ROI_SIZE;
       for (let u = 0; u < ROI_SIZE; u++) {
-        if (seg[row + u] > this.probThresh) { tsx += u; tsy += v; tn++; }
+        if (seg[row + u] <= this.probThresh) continue;
+        const { nx, ny } = faceXY(sx0 + (u + 0.5) / ROI_SIZE * ss, sy0 + (v + 0.5) / ROI_SIZE * ss);
+        xs.push(nx); ys.push(ny);
       }
     }
+    const tn = xs.length;
     if (tn < MIN_TONGUE_PIXELS) return { direction: null, mouthOpen: true, openRatio, method: '舌頭太小', votes, tongueArea: tn };
-    const { nx, ny } = faceXY(sx0 + (tsx / tn) / ROI_SIZE * ss, sy0 + (tsy / tn) / ROI_SIZE * ss);
-    if (Math.max(Math.abs(nx), Math.abs(ny)) < MIN_CENTROID_OFFSET) {
-      return { direction: null, mouthOpen: true, openRatio, method: '舌頭在正中間', votes, tongueArea: tn, nx, ny };
-    }
-    return { direction: toDir(nx, ny), mouthOpen: true, openRatio, method: '質心', votes, tongueArea: tn, nx, ny };
+    // 嘴唇外框(臉的座標):上唇最高、下唇最低、左右嘴角
+    let top = Infinity, bottom = -Infinity, leftB = -Infinity, rightB = Infinity;
+    for (const i of OUTER_UPPER) { const { nx, ny } = faceXY(P(i).x, P(i).y); top = Math.min(top, ny); leftB = Math.max(leftB, nx); rightB = Math.min(rightB, nx); }
+    for (const i of OUTER_LOWER) { const { ny } = faceXY(P(i).x, P(i).y); bottom = Math.max(bottom, ny); }
+    // 用第 3 / 97 百分位當舌頭的邊緣,少數雜點不會影響;上下換算成和左右相同的單位(半個嘴寬)
+    const pct = (a, q) => { a.sort((m, n) => m - n); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
+    const k = halfH / halfW;
+    const protrusion = {
+      '上': (top - pct(ys, 0.03)) * k,
+      '下': (pct(ys, 0.97) - bottom) * k,
+      '左': pct(xs, 0.97) - leftB,
+      '右': rightB - pct(xs, 0.03),
+    };
+    const [dir, amount] = Object.entries(protrusion).sort((a, b) => b[1] - a[1])[0];
+    if (amount < MIN_PROTRUSION) return { direction: null, mouthOpen: true, openRatio, method: '舌頭沒伸出嘴唇', votes, tongueArea: tn };
+    return { direction: dir, mouthOpen: true, openRatio, method: '伸出方向', votes, tongueArea: tn };
   }
 
   dispose() {
