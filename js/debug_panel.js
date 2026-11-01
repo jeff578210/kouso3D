@@ -8,6 +8,23 @@ const sections = {};
 let panel = null;
 let lastDraw = 0;
 
+// 除錯模式下在畫面左下角加一個按鈕,回傳按鈕元素(可以改文字);沒開除錯模式時回傳 null
+let toolbar = null;
+export function debugButton(label, onClick) {
+    if (!DEBUG) return null;
+    if (!toolbar) {
+        toolbar = document.createElement('div');
+        toolbar.style.cssText = 'position: fixed; left: 8px; bottom: 8px; z-index: 10001; display: flex; gap: 6px;';
+        document.body.appendChild(toolbar);
+    }
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.style.cssText = 'padding: 8px 12px; font-size: 14px; border-radius: 8px; background: rgba(0,0,0,0.75);';
+    btn.addEventListener('click', onClick);
+    toolbar.appendChild(btn);
+    return btn;
+}
+
 // section:區塊名稱;rows:{ 標題: 值 },數字自動取到小數第二位
 export function debugShow(section, rows) {
     if (!DEBUG) return;

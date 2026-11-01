@@ -9,7 +9,7 @@ import { currentVrm, currentTrainingMode, isGameRunning, currentDifficulty,
 import { TongueDirectionDetector } from './tongue_direction.js';
 import { onFaceFrame } from './face_tracker.js';
 import { smoothToward, createMatchFilter } from './judge_utils.js';
-import { debugShow } from './debug_panel.js';
+import { debugShow, debugButton } from './debug_panel.js';
 // 使用 index.html 上載入的全域 tf(已升級為 TF 4.x);speech-commands 也共用這個版本
 const tf = window.tf;
 
@@ -90,6 +90,44 @@ function checkTonguePoseMatch(targetPose, detectedAction, confidence, threshold)
 
 const INTERNAL_TO_ARROW = { tongueUp: '⬆️', tongueDown: '⬇️', tongueLeft: '⬅️', tongueRight: '➡️' };
 
+// ── 除錯模式(?debug=1)的「記錄樣本」:把當下的嘴巴小圖、舌頭模型輸出、臉部點位存起來,
+//    下載成 JSON 拿來分析判斷方法。只存在玩家自己的電腦,不會上傳 ──
+const samples = [];
+let captureRequested = false;
+debugButton('📸 記錄舌頭樣本', () => {
+  captureRequested = true;
+  if (detector) detector._cachedSeg = null; // 下一張畫面重新推論,小圖和模型輸出才會是同一張
+});
+const downloadBtn = debugButton('💾 下載樣本 (0)', () => {
+  if (!samples.length) return;
+  const blob = new Blob([JSON.stringify({ version: 1, userAgent: navigator.userAgent, samples })], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tongue-samples-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+function recordSample(r, landmarks, target) {
+  const seg = detector._cachedSeg;
+  const sample = {
+    target, detected: r.direction, method: r.method || null, votes: r.votes || null, openRatio: r.openRatio,
+    video: { w: video.videoWidth, h: video.videoHeight },
+    landmarks: landmarks.map(p => [+p.x.toFixed(5), +p.y.toFixed(5)]),
+  };
+  if (r.mouthOpen && seg) {
+    sample.roi = { x0: seg.x0, y0: seg.y0, s: seg.s };
+    sample.roiPng = detector.roiCanvas.toDataURL('image/png');
+    const bytes = new Uint8Array(seg.data.length);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.round(seg.data[i] * 255);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    sample.seg = btoa(bin); // 128×128,每格 0~255 = 舌頭機率
+  }
+  samples.push(sample);
+  if (downloadBtn) downloadBtn.textContent = `💾 下載樣本 (${samples.length})`;
+}
+
 // results 來自共用的 MediaPipe FaceLandmarker,不再自己重跑一次偵測
 function handleFaceFrame(results, now) {
   const dt = Math.min(now - lastTime, MAX_DT);
@@ -100,6 +138,11 @@ function handleFaceFrame(results, now) {
   const r = hasFace ? detector.detect(video, results.faceLandmarks[0]) : null;
   // r.direction → '上' | '下' | '左' | '右' | null(玩家自己的左右)
   // r.mouthOpen → boolean(閉嘴時 direction 必為 null,且不會跑推論)
+
+  if (r && captureRequested) {
+    captureRequested = false;
+    recordSample(r, results.faceLandmarks[0], isGameRunning ? poseQueue[0] : null);
+  }
 
   if (r) {
     // 依實際經過時間平滑(以前是每張畫面固定 10%,鏡頭每秒張數不同時反應速度會差一倍)
