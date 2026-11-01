@@ -17,3 +17,6 @@
 發音特徵觸發 (Voice-Triggered Events): 系統能即時分析使用者的特定發音特徵，並將其轉化為觸發遊戲進程的關鍵指令。
 
 低延遲流暢體驗 (Low-Latency Interaction): 針對影像與聲音的雙重資料流進行效能優化，確保在網頁端執行 AI 辨識時，仍能維持遊戲的高幀率 (FPS) 與即時回饋感。
+
+🌲 3D 場景素材 (Credits)
+KayKit Forest Nature Pack by Kay Lousberg (www.kaylousberg.com),CC0 授權,授權檔在 assets3d/KayKit-Forest-License.txt。

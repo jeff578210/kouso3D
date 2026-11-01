@@ -1,5 +1,5 @@
 // js/audio.js
-// 遊戲音訊集中管理:共用 AudioContext、按需開關的麥克風、背景噪音追蹤、過關音效。
+// 遊戲音訊集中管理:共用 AudioContext、按需開關的麥克風、背景噪音追蹤、過關音效與 3D 場景的效果音。
 //
 // 麥克風刻意「不」開回音消除 / 降噪 / 自動增益:這些通話處理會讓裝置切進通話模式,
 // 系統會把背景音樂與音效壓小、聽起來斷斷續續(所有瀏覽器都會)。遊戲只需要量音量,
@@ -105,6 +105,87 @@ export function readVolume() {
 export function updateThresholdLine(baseThreshold) {
     const line = document.getElementById("meter-threshold");
     if (line) line.style.left = `${Math.min(((baseThreshold + noiseFloor) / 80) * 100, 100)}%`;
+}
+
+// ── 3D 場景的效果音(泡泡破掉、敲石頭、石頭碎裂),一樣即時合成 ──
+let sfxBus = null;
+let noiseBuffer = null;
+
+// 音訊環境還沒被玩家點擊啟動時回傳 null(不播)
+function sfxContext() {
+    const c = getAudioContext();
+    if (c.state !== 'running') return null;
+    if (!sfxBus) {
+        sfxBus = c.createGain();
+        sfxBus.gain.value = 0.8;
+        sfxBus.connect(c.destination);
+        noiseBuffer = c.createBuffer(1, c.sampleRate, c.sampleRate);
+        const d = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    return c;
+}
+
+function envelope(gain, t, peak, attack, decay) {
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+}
+
+// 音高從 f0 滑到 f1 的短音
+function tone(c, type, f0, f1, t, dur, peak) {
+    const osc = c.createOscillator();
+    const gain = c.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, t);
+    osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    envelope(gain, t, peak, 0.006, dur);
+    osc.connect(gain).connect(sfxBus);
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
+}
+
+// 濾過的雜音(碎裂、撞擊的質感)
+function noiseBurst(c, filterType, freq, q, t, dur, peak) {
+    const src = c.createBufferSource();
+    const filter = c.createBiquadFilter();
+    const gain = c.createGain();
+    src.buffer = noiseBuffer;
+    filter.type = filterType;
+    filter.frequency.value = freq;
+    filter.Q.value = q;
+    envelope(gain, t, peak, 0.004, dur);
+    src.connect(filter).connect(gain).connect(sfxBus);
+    src.start(t, Math.random() * 0.5);
+    src.stop(t + dur + 0.05);
+}
+
+// 泡泡破掉:「啵」— 音高快速上揚的短音 + 一點清脆的雜音
+export function playPop() {
+    const c = sfxContext();
+    if (!c) return;
+    const t = c.currentTime;
+    tone(c, 'sine', 380, 1150, t, 0.12, 0.5);
+    noiseBurst(c, 'highpass', 3000, 0.7, t, 0.03, 0.15);
+}
+
+// 石頭被敲:低沉的悶響
+export function playThud() {
+    const c = sfxContext();
+    if (!c) return;
+    const t = c.currentTime;
+    tone(c, 'sine', 120, 50, t, 0.18, 0.7);
+    noiseBurst(c, 'lowpass', 500, 0.8, t, 0.12, 0.5);
+}
+
+// 石頭碎裂:碎石的劈啪聲 + 低頻的轟
+export function playCrack() {
+    const c = sfxContext();
+    if (!c) return;
+    const t = c.currentTime;
+    noiseBurst(c, 'bandpass', 1800, 0.9, t, 0.35, 0.6);
+    noiseBurst(c, 'lowpass', 300, 0.7, t, 0.45, 0.6);
+    tone(c, 'sine', 75, 35, t, 0.45, 0.7);
 }
 
 // 過關音效:Web Audio 即時合成的上升三和弦(不需要額外音檔)

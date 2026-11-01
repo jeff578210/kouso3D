@@ -1,11 +1,10 @@
 // js/mode_voice.js
-import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,getVolumeLevel, DIFFICULTY_CONFIG} from './app.js';
-import { isMicOpen, readVolume, noiseFloor, updateThresholdLine } from './audio.js';
+import { currentVrm, currentTrainingMode, isGameRunning, isTutorialLocked, gameStats, poseQueue, triggerResult ,currentDifficulty ,renderBelt,getVolumeLevel, DIFFICULTY_CONFIG, world} from './app.js';
+import { isMicOpen, readVolume, noiseFloor, updateThresholdLine, playSuccessSound } from './audio.js';
 import { onFaceFrame } from './face_tracker.js';
 
 let isDetecting = false; //檢查遊戲有沒有再進行
 let isFrameHandlerRegistered = false; //只向共用臉部偵測註冊一次,避免每局疊加一條迴圈
-let currentTargetSyllable; //當前題目
 let hitCooldown = false; //防止連擊
 let isWaitingForNextSound = false; //防止連擊
 let loudMs = 0; //聲音連續超過門檻多久(ms)
@@ -189,38 +188,37 @@ function updateStoneTimer(dt) {
     if (!isGameRunning || conf.isTutorial || voiceConfig.remainingHits <= 0) return;
 
     voiceConfig.stoneTimeLeft -= dt;
-    const stone = document.getElementById("stone-container");
-    const hp = document.getElementById("stone-hp");
-    const secondsLeft = Math.max(0, Math.ceil(voiceConfig.stoneTimeLeft / 1000));
-    if (hp) hp.innerText = `剩餘 ${voiceConfig.remainingHits} 次 · ⏱️ ${secondsLeft} 秒`;
-    if (stone) stone.classList.toggle("stone-warning", voiceConfig.stoneTimeLeft <= 3000);
+    // 石頭上方的倒數,剩 3 秒時變紅
+    world.setStoneLabel(stoneLabel(), voiceConfig.stoneTimeLeft <= 3000);
 
     if (voiceConfig.stoneTimeLeft <= 0) {
         voiceConfig.remainingHits = 0; // 換下一顆石頭前,這顆不能再被敲到
-        if (stone) stone.classList.remove("stone-warning");
         triggerResult(false);
     }
 }
 
-
+// 石頭上方顯示的文字:剩餘次數(有限時的難度再加上倒數秒數)
+function stoneLabel() {
+    if (DIFFICULTY_CONFIG[currentDifficulty].isTutorial) return `剩餘 ${voiceConfig.remainingHits} 次`;
+    const secondsLeft = Math.max(0, Math.ceil(voiceConfig.stoneTimeLeft / 1000));
+    return `剩餘 ${voiceConfig.remainingHits} 次 · ⏱️ ${secondsLeft} 秒`;
+}
 
 function triggerStoneHit() {
     if (hitCooldown || voiceConfig.remainingHits <= 0) return; // 石頭已碎或時間到,等下一顆
     hitCooldown = true;
     voiceConfig.remainingHits--; //將這顆石頭的剩餘需要打擊次數減 1。
-    const stone = document.getElementById("stone-container");
-    const hp = document.getElementById("stone-hp");
 
-    if (voiceConfig.remainingHits > 0) {//石頭扣寫
-        stone.classList.add("stone-hit");
-        setTimeout(() => { stone.classList.remove("stone-hit"); hitCooldown = false; }, 400);
-        hp.innerText = `剩餘 ${voiceConfig.remainingHits} 次`;
+    if (voiceConfig.remainingHits > 0) {//石頭扣血:震動 + 塵土 + 悶響
+        world.stoneHit();
+        world.setStoneLabel(stoneLabel(), voiceConfig.stoneTimeLeft <= 3000);
+        setTimeout(() => { hitCooldown = false; }, 400);
     } else {
-        stone.classList.add("stone-explode"); //石頭破碎動畫
-        if (gameStats && gameStats[currentTargetSyllable]) gameStats[currentTargetSyllable].success++; //寫入統計數據成功與失敗次數
+        world.stoneBreak(); //石頭碎裂:碎片 + 紙屑 + 鏡頭震動
+        playSuccessSound();
         setTimeout(() => {
             hitCooldown = false; //解開連擊鎖
-            triggerResult(true); //紀錄過關
-        }, 1000); // 給予1秒鐘的時間顯示爆炸動畫
+            triggerResult(true); //紀錄過關(統計在這裡加)
+        }, 1000); // 給予1秒鐘的時間顯示碎裂動畫
     }
 }

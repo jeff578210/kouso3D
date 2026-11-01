@@ -1,9 +1,7 @@
 // ==========================================
 // 核心模組載入
 // ==========================================
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin } from '@pixiv/three-vrm';
+import { createWorld } from './world3d.js';
 // MediaPipe 改在 initMediaPipe() 裡動態載入,CDN 失敗時才能顯示錯誤畫面
 
 import { startMouthDetection, stopMouthDetection, setMicStatus } from './mode_mouth.js';
@@ -27,6 +25,7 @@ export let accumulatedHoldTime = 0;
 export let videoElement;//全域的攝影機
 export let globalStream;//攝影機影像來源(麥克風改由 audio.js 在需要時才開)
 export let faceLandmarker;//MediaPipe元件
+export let world = null; //左邊的 3D 世界(world3d.js),題目泡泡/巨石與過關特效都由它顯示
 
 //各等級辨識參數
 export const DIFFICULTY_CONFIG = {
@@ -35,12 +34,6 @@ export const DIFFICULTY_CONFIG = {
     medium: { requireAudio: true, volThreshold: 15, holdDuration: 2000, accumulateProgress: false, isTutorial: false, jaw_A: 0.35, pucker_U: 0.55, funnel_O: 0.35, stretch_I: 0.4, stretch_E: 0.25 },
     hard: { requireAudio: true, volThreshold: 25, holdDuration: 2000, accumulateProgress: false, isTutorial: false, jaw_A: 0.45, pucker_U: 0.7, funnel_O: 0.4, stretch_I: 0.5, stretch_E: 0.35 }
 };
-
-// --- 私有 UI 與遊戲變數 ---
-let scene, camera, renderer, clock;
-let turnTimeLeft = 5000;
-let blinkTimer = 0;
-let nextBlinkInterval = 3;
 
 export let gameStats = {};
 export let playerName = '';   // 由開頭的玩家名稱輸入框設定;會跟結算統計一起送到 API
@@ -59,11 +52,15 @@ bgm.volume = IS_MOBILE ? 0.6 : 0.8;
 // 1. 初始化系統與 3D 渲染
 // ==========================================
 async function startSystem() {
-    initThreeJS(); 
-    await initMediaPipe();
-    await initCamera();
-    // await initTfjsVoice();
-    await initTongueMode();
+    // 3D 場景和臉部辨識/鏡頭/舌頭模型同時載入
+    await Promise.all([
+        initWorld(),
+        (async () => {
+            await initMediaPipe();
+            await initCamera();
+            await initTongueMode();
+        })(),
+    ]);
 
     // 全遊戲共用一條臉部偵測迴圈,各模式只接收結果
     startFaceTracking(faceLandmarker, videoElement);
@@ -147,6 +144,7 @@ export async function initCamera() {
 
 function unlockGameUI(){
     document.getElementById("loading-overlay").style.display = "none";
+    world.playIntro(); // 載入畫面拿掉後,鏡頭從山谷上空飛到人物面前
     const btns = ["btn-tutorial", "btn-easy", "btn-medium", "btn-hard"];
     btns.forEach(id => {
         const btn = document.getElementById(id);
@@ -163,108 +161,20 @@ function unlockGameUI(){
     }
 }
 
-function initThreeJS() {
-    const container = document.getElementById("canvas-container");
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xb1e1ff); 
-
-    camera = new THREE.PerspectiveCamera(30, container.clientWidth / container.clientHeight, 0.1, 20);
-    camera.position.set(0, 1.52, 0.8); 
-    camera.lookAt(0, 1.52, 0); 
-
-    renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.outputColorSpace = THREE.SRGBColorSpace; 
-    container.appendChild(renderer.domElement);
-
-    const light = new THREE.DirectionalLight(0xffffff, 0.4); 
-    light.position.set(1, 1, 1).normalize();
-    scene.add(light);
-    scene.add(new THREE.AmbientLight(0xffffff, 0.3)); 
-
-    const textureLoader = new THREE.TextureLoader();
-    textureLoader.load('./bg_grassland.jpg', texture => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        scene.background = texture;
-    });
-    
-    const loader = new GLTFLoader();
-    loader.register((parser) => new VRMLoaderPlugin(parser));
-    loader.load("./vrm/VRMWithTongue.vrm", (gltf) => {
-        const vrm = gltf.userData.vrm;
-        scene.add(vrm.scene);
-        currentVrm = vrm;
-        vrm.scene.rotation.y = 0; 
-        
-        const leftUpperArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
-        const rightUpperArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
-        if (leftUpperArm) leftUpperArm.rotation.z = -1.1; 
-        if (rightUpperArm) rightUpperArm.rotation.z = 1.1;
-    });
-
-    clock = new THREE.Clock();
-    animate3D();
-
-    // 🔥 RWD：監聽視窗 / 容器尺寸變化,自動重繪 3D 畫面
-    // 使用 ResizeObserver 可以同時應對視窗 resize、orientation 變化、與面板 flex 重排
-    // ⚠️ 相機框景在所有版面都保持一致(電腦版的「頭到肩膀」特寫)。
-    //    寬扁畫面(平板/手機堆疊)只是水平視野變寬,垂直框景與電腦版完全相同,
-    //    確保虛擬人物從頭到肩膀的部分維持一樣的呈現方式。
-    const resize3D = () => {
-        if (!renderer || !camera) return;
-        const w = container.clientWidth;
-        const h = container.clientHeight;
-        if (w === 0 || h === 0) return;
-
-        // 統一相機位置:與電腦版左右分屏相同(頭部正面特寫)
-        camera.position.set(0, 1.52, 0.8);
-        camera.lookAt(0, 1.52, 0);
-
-        camera.aspect = w / h;
-        camera.updateProjectionMatrix();
-        renderer.setSize(w, h, false);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    };
-    if (typeof ResizeObserver !== 'undefined') {
-        const ro = new ResizeObserver(resize3D);
-        ro.observe(container);
-    }
-    window.addEventListener('resize', resize3D);
-    window.addEventListener('orientationchange', () => {
-        // 旋轉螢幕後常會有 0.x 秒的視窗高度沒立刻更新,延遲再算一次
-        setTimeout(resize3D, 150);
-        setTimeout(resize3D, 500);
-    });
-    // 🔥 載入完成立刻校正一次,避免初始閃爍(原本是固定電腦框景)
-    resize3D();
-    // 雙保險:dom 完成排版後再呼叫一次
-    requestAnimationFrame(resize3D);
+// 3D 畫質:手機與核心數/記憶體較少的電腦用低畫質(網址加 ?q=high 或 ?q=low 可強制指定)
+function pickQuality() {
+    const forced = new URLSearchParams(location.search).get('q');
+    if (forced === 'high' || forced === 'low') return forced;
+    const weak = IS_MOBILE || (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4;
+    return weak ? 'low' : 'high';
 }
 
-function animate3D() {
-    requestAnimationFrame(animate3D);
-    const deltaTime = clock.getDelta();
-    
-    if (currentVrm) {
-        blinkTimer += deltaTime;
-        let blinkValue = 0;
-        if (blinkTimer >= nextBlinkInterval) {
-            let blinkPhase = blinkTimer - nextBlinkInterval; 
-            if (blinkPhase < 0.1) blinkValue = blinkPhase / 0.1;
-            else if (blinkPhase < 0.2) blinkValue = 1 - ((blinkPhase - 0.1) / 0.1);
-            else {
-                blinkTimer = 0;
-                nextBlinkInterval = 2 + Math.random() * 3;
-                blinkValue = 0;
-            }
-        }
-        currentVrm.expressionManager.setValue('blinkLeft', blinkValue);
-        currentVrm.expressionManager.setValue('blinkRight', blinkValue);
-        currentVrm.expressionManager.setValue('blink', blinkValue); 
-        currentVrm.update(deltaTime);
-    }
-    renderer.render(scene, camera);
+// 左邊的 3D 世界:場景、人物、鏡頭、尺寸變化都由 world3d.js 處理
+async function initWorld() {
+    world = await createWorld(document.getElementById("canvas-container"), {
+        quality: pickQuality(),
+        onVrmLoaded: vrm => { currentVrm = vrm; },
+    });
 }
 
 // ==========================================
@@ -329,6 +239,7 @@ window.endGame = endGame;
 let tutorialIndex = 0;
 let turnToken = 0; // 每出一題 +1,用來辨識語音解鎖事件是不是屬於目前這一題
 let isStartingGame = false; // 開局時正在等麥克風開啟,避免重複點擊開兩局
+let gameRound = 0; // 每開一局 +1,讓上一局還沒跑完的延遲動作(換下一題)作廢
 const TUTORIAL_SEQUENCE = ["ㄚ", "ㄧ", "ㄨ", "ㄚ", "ㄧ", "ㄨ", "ㄚ", "ㄧ", "ㄨ"];
 
 async function startGame(mode) {
@@ -357,6 +268,7 @@ async function startGame(mode) {
 
     currentDifficulty = mode;
     isGameRunning = true;
+    gameRound++;
     isTutorialLocked = (mode === "tutorial");
     tutorialIndex = 0;
 
@@ -375,7 +287,8 @@ async function startGame(mode) {
     statKeys.forEach(k => { gameStats[k] = { success: 0, fail: 0 }; });
 
     // 切換 UI 顯示狀態
-    changeUIshow(currentTrainingMode === 'voice');
+    changeUIshow();
+    world.setMode(currentTrainingMode); // 左邊 3D:嘴型/舌頭出現目標圈與泡泡,發聲出現巨石
     const meterContainer = document.getElementById("audio-meter-container");
 
     // 🌟 UI 與麥克風強制連動邏輯
@@ -432,13 +345,7 @@ function endGame() {
     window.speechSynthesis.cancel();
     stopAllEngines();
     closeMic(); // 回到首頁就關麥克風
-    // 隱藏舌頭的冰淇淋
-    const ic = document.getElementById("ice-cream-target");
-    if (ic) ic.style.display = "none";
-
-    // 🌟 修復 3：遊戲結束時強制隱藏巨石介面
-    const voiceUI = document.getElementById("voice-game-ui");
-    if (voiceUI) voiceUI.style.display = "none";
+    world?.setMode(null); // 收起 3D 的題目泡泡/巨石
 
     // 恢復 UI 顯示狀態
     const els = {
@@ -446,7 +353,6 @@ function endGame() {
         "start-controls": "flex",
         "history-controls": "flex",
         "game-controls": "none",
-        "game-ui": "none",
         "audio-meter-container": "none" ,
         "mode-mouth":"flex", //嘴型訓練按鈕
         "mode-voice":"flex", //發聲訓練按鈕
@@ -615,51 +521,16 @@ function initQueue() {
         
 }
 
-//不管任何狀態只要呼叫就將輸送帶重新渲染
+//依目前的題目佇列更新左邊 3D 的題目(嘴型/舌頭:沿小路飄來的泡泡;發聲:路上的巨石)
 export function renderBelt() {
     if (poseQueue.length === 0) return;
     if (currentTrainingMode === 'voice') {
-        // ==========================================
-        // 🎤 發聲模式：渲染中央大石頭
-        // ==========================================
-        const stone = document.getElementById("stone-container");
-        const text = document.getElementById("stone-text");
-        const hp = document.getElementById("stone-hp");
+        // 新的一顆石頭:重設血量與限時
         voiceConfig.remainingHits = (currentDifficulty === 'tutorial') ? 1 : voiceConfig.MAX_HEALTH;//教學模式血量1
         voiceConfig.stoneTimeLeft = voiceConfig.STONE_TIME_LIMIT; //新石頭重新計時
-        if (stone && text && hp) {
-            stone.className = ""; // 瞬間洗掉上一回合的爆炸或震動動畫
-            text.innerText = poseQueue[0]; // 直接從陣列拿最新的題目
-            
-            // 確保畫面上顯示最新的血量 (remainingHits 需要是全域變數，並在呼叫此函式前先更新好)
-            hp.innerText = `剩餘 ${voiceConfig.remainingHits} 次`; 
-        }
-
     }
-    else {
-        // ==========================================
-        // 👄👅 嘴型/舌頭模式：渲染無限輸送帶泡泡
-        // ==========================================
-        const conveyorBelt = document.getElementById("conveyor-belt");//輸送帶元素
-        if (!conveyorBelt) return;
-
-        conveyorBelt.innerHTML = "";
-        conveyorBelt.style.transition = "none";//關閉動畫顯示不然translateX(0)將泡泡拉回時,會顯示出泡泡向右移動
-        conveyorBelt.style.transform = "translateX(0)";
-
-        poseQueue.forEach((pose, index) => { //泡泡渲染回來
-            const bubble = document.createElement("div");
-            bubble.className = "bubble";
-            
-            if (index === 0) {
-                bubble.classList.add("current");;//最左側泡泡加大加粗
-            }
-            
-            bubble.id = `bubble-${index}`;
-            bubble.innerText = pose;
-            conveyorBelt.appendChild(bubble);
-        });
-    }
+    world.setQueue(poseQueue);
+    if (currentTrainingMode === 'voice') world.setStoneLabel(`剩餘 ${voiceConfig.remainingHits} 次`);
 }
 
 function startTurnTimer() {
@@ -687,9 +558,7 @@ function startTurnTimer() {
         else if (targetPose === '➡️') spokenText = '舌頭往右';
     }
 
-    const currentBubble = document.getElementById("bubble-0");//取得最左邊泡泡
-    const stone = document.getElementById("stone-container"); //取得石頭
-    window.speechSynthesis.cancel(); 
+    window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(spokenText);
     utterance.lang = "zh-TW";
 
@@ -705,23 +574,13 @@ function startTurnTimer() {
     const myTurn = ++turnToken;
     if (currentDifficulty === "tutorial" && tutorialIndex < lockThreshold) {
         //處於教學模式，且關卡還沒超過門檻，嚴格鎖定防搶拍
-        isTutorialLocked = true; 
-        //加上禁止符號特效
-        if(currentTrainingMode === 'voice'){
-            if(stone){
-                stone.classList.add("locked");
-            }
-        }else{
-            if (currentBubble){
-                currentBubble.classList.add("locked");
-            }
-        }
+        isTutorialLocked = true;
+        world.setLocked(true); //目前這題加上 🚫
         const unlock = () => {
             // 上一題被 cancel() 的語音也會觸發 onend/onerror,不能拿來解鎖新的題目
             if (myTurn !== turnToken) return;
             isTutorialLocked = false; // 語音乖乖唸完後，才解鎖讓玩家動作
-            if (currentBubble) currentBubble.classList.remove("locked");
-            if (stone) stone.classList.remove("locked");
+            world.setLocked(false);
         };
         utterance.onend = unlock;
         utterance.onerror = unlock; // 沒有中文語音包、被瀏覽器擋下時會走 onerror
@@ -734,43 +593,27 @@ function startTurnTimer() {
         
     } else {
         //已經超過教學門檻，不鎖定，可邊聽邊做或直接做
-        isTutorialLocked = false; 
-        // 防禦性編程：確保不需要鎖定時，泡泡絕對不會卡著禁止符號
-        if (currentBubble) currentBubble.classList.remove("locked");
-        if (stone) stone.classList.remove("locked");
+        isTutorialLocked = false;
+        world.setLocked(false); // 確保不需要鎖定時,題目絕對不會卡著禁止符號
     }
 }
 
 // 過關/失敗處理器
 export function triggerResult(isSuccess) {
-    const targetBubble = document.getElementById("bubble-0");
-    const conveyorBelt = document.getElementById("conveyor-belt");
-    const ic = document.getElementById("ice-cream-target"); 
-    const stone = document.getElementById("stone-container");
+    if (!isGameRunning) return; // 遊戲已經結束(例如石頭碎掉的動畫期間按了結束遊戲)
 
     if (isSuccess) {
-        playSuccessSound(); // 過關音效
+        if (currentTrainingMode !== 'voice') playSuccessSound(); // 過關音效(發聲模式在石頭碎掉的當下就播了)
         gameStats[poseQueue[0]] && gameStats[poseQueue[0]].success++;//類計成功次數
-        if (currentTrainingMode === 'mouth') {
-            if(targetBubble) targetBubble.classList.add("pop-animation"); //成功時，泡泡（bubble-0）會播放破裂動畫（pop-animation）。
-        } else if (currentTrainingMode === 'voice') {
-            if(stone) stone.classList.add("stone-explode"); //石頭破碎動畫
-        } else if (currentTrainingMode === 'tongue') {
-            if(targetBubble) targetBubble.classList.add("pop-animation"); //成功時，泡泡（bubble-0）會播放破裂動畫（pop-animation）。
-            if (ic && currentTrainingMode === 'tongue') ic.classList.add('ic-pop'); //冰淇淋（ice-cream-target）的專屬特效
-        }
     } else {
         gameStats[poseQueue[0]] && gameStats[poseQueue[0]].fail++; //類計失敗次數
-        if(targetBubble) targetBubble.classList.add("fade-animation"); //泡泡失敗特效
-        if (currentTrainingMode === 'voice' && stone) stone.classList.add("fade-animation"); //發聲模式時間到,石頭淡出
     }
+    // 3D:成功 → 泡泡破掉 + 紙屑;失敗 → 泡泡變紅消散 / 石頭沉進地面。後面的題目同時往前推進
+    world.resolve(isSuccess);
 
-    if (conveyorBelt) { //輸送帶推進動畫,將泡泡向左移動
-        conveyorBelt.style.transition = "transform 0.5s ease-in-out";
-        conveyorBelt.style.transform = "translateX(-110px)"; 
-    }
-
+    const round = gameRound;
     setTimeout(() => {
+        if (!isGameRunning || round !== gameRound) return; // 這段時間內遊戲結束或重新開局了
         poseQueue.shift(); // 移除已經判定過的目標
         
         // 👇 徹底分流：確保教學結束就是結束，一般模式就是無限隨機
@@ -795,19 +638,17 @@ export function triggerResult(isSuccess) {
             poseQueue.push(targetList[Math.floor(Math.random() * targetList.length)]);//隨機塞入題目
         }
 
-        renderBelt();  //根據更新後的 poseQueue 重新畫出輸送帶上的內容
+        renderBelt();  //根據更新後的 poseQueue 更新 3D 的題目(補上最後面新的一題)
         startTurnTimer(); //負責推進遊戲的「流程與邏輯」
-    }, 500); //設定為500毫秒對其上方的輸送帶動畫時間
+    }, 500); //等泡泡破掉、後面的題目往前推進的動畫
 }
 
-function changeUIshow(isVoiceMode){
+function changeUIshow(){
 const els = {
         "tutorial-controls": "none",
         "start-controls": "none",
         "history-controls": "none",
         "game-controls": "flex",
-        "game-ui": isVoiceMode ? "none" : "flex",
-        "voice-game-ui": isVoiceMode ? "flex" : "none", 
         "stats-panel": "none",
         "audio-meter-container": "flex" ,
         "mode-mouth":"none", //嘴型訓練按鈕
